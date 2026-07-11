@@ -6,7 +6,21 @@ jobs:
   rdp-test:
     runs-on: windows-latest
     timeout-minutes: 360 # Max 6 hours
+    env:
+      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
     steps:
+      - name: Set Screen Resolution to 1920x1080
+        run: |
+          try {
+            Set-DisplayResolution -Width 1920 -Height 1080 -Force
+            Write-Host "✅ Resolution set to 1920x1080"
+          } catch {
+            Write-Host "⚠️ Set-DisplayResolution failed, trying registry method..."
+            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000" -Name "DefaultSettings.XResolution" -Value 1920 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000" -Name "DefaultSettings.YResolution" -Value 1080 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+            Write-Host "Registry updated (resolution may apply after VNC starts)"
+          }
+
       - name: Install TightVNC Server
         run: |
           choco install tightvnc -y --install-arguments '"/quiet /norestart ADDLOCAL=Server SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=tester123 SET_USECONTROLAUTHENTICATION=1 VALUE_OF_USECONTROLAUTHENTICATION=1 SET_CONTROLPASSWORD=1 VALUE_OF_CONTROLPASSWORD=tester123 SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1"'
@@ -23,14 +37,14 @@ jobs:
           # Create a simple redirect so opening the root URL goes straight to the VNC viewer
           Set-Content -Path "noVNC\index.html" -Value '<html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=tester123"></head></html>'
 
-      - name: Download cloudflared
+      - name: Install & Configure ngrok
         run: |
-          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+          choco install ngrok -y
+          ngrok config add-authtoken $env:NGROK_AUTH_TOKEN
 
-      - name: Start noVNC & Cloudflare Tunnel
+      - name: Start noVNC & ngrok Tunnel
         run: |
           # Start websockify (bridges browser websockets to VNC on port 5900)
-          # --web serves the noVNC HTML files on the same port
           Start-Process -FilePath "python" -ArgumentList "-m websockify --web=.\noVNC 6080 localhost:5900" -WindowStyle Hidden
           Start-Sleep -Seconds 3
 
@@ -42,32 +56,34 @@ jobs:
           }
           Write-Host "✅ websockify is running on port 6080"
 
-          # Start cloudflared tunnel pointing to the noVNC HTTP server
-          Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardOutput "cf_stdout.log" -RedirectStandardError "cf_stderr.log" -WindowStyle Hidden
-
-          # Wait for the tunnel URL
-          Write-Host "Waiting for Cloudflare Tunnel to start..."
+          # Start ngrok HTTP tunnel (free tier supports HTTP, just not TCP)
+          Start-Process -FilePath "ngrok" -ArgumentList "http 6080 --log stdout" -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok.err" -WindowStyle Hidden
+          
+          # Wait for ngrok to start and grab the URL from its local API
+          Write-Host "Waiting for ngrok tunnel..."
           $tunnelUrl = $null
-          for ($i = 1; $i -le 30; $i++) {
+          for ($i = 1; $i -le 20; $i++) {
             Start-Sleep -Seconds 2
-            if (Test-Path "cf_stderr.log") {
-              $logContent = Get-Content "cf_stderr.log" -Raw
-              if ($logContent -match "(https://[a-zA-Z0-9\-]+\.trycloudflare\.com)") {
-                $tunnelUrl = $matches[1]
-                break
-              }
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -ErrorAction Stop
+              $json = $response.Content | ConvertFrom-Json
+              $tunnelUrl = $json.tunnels[0].public_url
+              if ($tunnelUrl) { break }
+            } catch {
+              Write-Host "  Attempt $i/20 - ngrok not ready yet..."
             }
           }
 
           if (-not $tunnelUrl) {
-            Write-Host "❌ Failed to start Cloudflare Tunnel! Here are the logs:"
+            Write-Host "❌ Failed to start ngrok! Here are the logs:"
             Write-Host "---- STDOUT ----"
-            if (Test-Path "cf_stdout.log") { Get-Content "cf_stdout.log" }
+            if (Test-Path "ngrok.log") { Get-Content "ngrok.log" }
             Write-Host "---- STDERR ----"
-            if (Test-Path "cf_stderr.log") { Get-Content "cf_stderr.log" }
+            if (Test-Path "ngrok.err") { Get-Content "ngrok.err" }
             exit 1
           }
 
+          Write-Host ""
           Write-Host "======================================================="
           Write-Host "✅ READY TO CONNECT!"
           Write-Host ""
