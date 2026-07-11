@@ -30,16 +30,33 @@ jobs:
 
       - name: Start Tunnel & Print URL
         run: |
-          # Start ngrok in the background
-          Start-Process -FilePath "ngrok" -ArgumentList "tcp 3389" -WindowStyle Hidden
+          # Start ngrok and log output so we can see why it crashes
+          Start-Process -FilePath "ngrok" -ArgumentList "tcp 3389 --log stdout" -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok.err" -WindowStyle Hidden
           
-          # Wait a few seconds for the tunnel to establish
-          Start-Sleep -Seconds 5
+          # Wait up to 15 seconds for the tunnel to establish
+          $success = $false
+          for ($i=1; $i -le 60; $i++) {
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -ErrorAction Stop
+              $json = $response.Content | ConvertFrom-Json
+              $url = $json.tunnels[0].public_url
+              if ($url) {
+                $success = $true
+                break
+              }
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+          }
           
-          # Ask the local ngrok API what our public URL is
-          $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing
-          $json = $response.Content | ConvertFrom-Json
-          $url = $json.tunnels[0].public_url
+          if (-not $success) {
+            Write-Host "❌ Failed to start ngrok! Here are the logs:"
+            Write-Host "---- STDOUT ----"
+            Get-Content ngrok.log
+            Write-Host "---- STDERR ----"
+            Get-Content ngrok.err
+            exit 1
+          }
           
           Write-Host "======================================================="
           Write-Host "✅ READY TO CONNECT!"
@@ -49,6 +66,5 @@ jobs:
           Write-Host "🔑 Password: $env:RDP_PASSWORD"
           Write-Host "======================================================="
           
-          # Keep the runner alive for up to 6 hours (GitHub's maximum)
           Write-Host "Keeping the runner alive... (Cancel the workflow manually when done)"
           while ($true) { Start-Sleep -Seconds 60 }
