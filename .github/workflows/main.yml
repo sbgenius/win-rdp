@@ -6,40 +6,52 @@ jobs:
   rdp-test:
     runs-on: windows-latest
     timeout-minutes: 360 # Max 6 hours
-    env:
-      # Feel free to change this password, but Windows requires it to be complex!
-      RDP_PASSWORD: "SuperSecretPassword123!" 
     steps:
-      - name: Enable Remote Desktop
+      - name: Install TightVNC Server
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          choco install tightvnc -y --install-arguments '"/quiet /norestart ADDLOCAL=Server SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=tester123 SET_USECONTROLAUTHENTICATION=1 VALUE_OF_USECONTROLAUTHENTICATION=1 SET_CONTROLPASSWORD=1 VALUE_OF_CONTROLPASSWORD=tester123"'
 
-      - name: Create User Account
+      - name: Setup Python websockify & Download noVNC
         run: |
-          $Password = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
-          New-LocalUser -Name "tester" -Password $Password
-          Add-LocalGroupMember -Group "Administrators" -Member "tester"
+          pip install websockify
+
+          # Download noVNC (the browser-based VNC client)
+          Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "novnc.zip"
+          Expand-Archive -Path "novnc.zip" -DestinationPath "."
+          Rename-Item -Path "noVNC-1.5.0" -NewName "noVNC"
+
+          # Create a simple redirect so opening the root URL goes straight to the VNC viewer
+          Set-Content -Path "noVNC\index.html" -Value '<html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=tester123"></head></html>'
 
       - name: Download cloudflared
         run: |
           Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
 
-      - name: Start Cloudflare Tunnel & Print Connection Info
+      - name: Start noVNC & Cloudflare Tunnel
         run: |
-          # Start cloudflared in the background, tunneling RDP (port 3389)
-          # Quick tunnels require no account, no token, and are completely free
-          Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -RedirectStandardOutput "cf_stdout.log" -RedirectStandardError "cf_stderr.log" -WindowStyle Hidden
+          # Start websockify (bridges browser websockets to VNC on port 5900)
+          # --web serves the noVNC HTML files on the same port
+          Start-Process -FilePath "python" -ArgumentList "-m websockify --web=.\noVNC 6080 localhost:5900" -WindowStyle Hidden
+          Start-Sleep -Seconds 3
 
-          # Wait for cloudflared to establish the tunnel and print the URL
+          # Verify websockify is running
+          $ws = Get-NetTCPConnection -LocalPort 6080 -ErrorAction SilentlyContinue
+          if (-not $ws) {
+            Write-Host "❌ websockify failed to start!"
+            exit 1
+          }
+          Write-Host "✅ websockify is running on port 6080"
+
+          # Start cloudflared tunnel pointing to the noVNC HTTP server
+          Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url http://localhost:6080" -RedirectStandardOutput "cf_stdout.log" -RedirectStandardError "cf_stderr.log" -WindowStyle Hidden
+
+          # Wait for the tunnel URL
           Write-Host "Waiting for Cloudflare Tunnel to start..."
           $tunnelUrl = $null
           for ($i = 1; $i -le 30; $i++) {
             Start-Sleep -Seconds 2
             if (Test-Path "cf_stderr.log") {
               $logContent = Get-Content "cf_stderr.log" -Raw
-              # cloudflared prints the tunnel URL to stderr
               if ($logContent -match "(https://[a-zA-Z0-9\-]+\.trycloudflare\.com)") {
                 $tunnelUrl = $matches[1]
                 break
@@ -59,17 +71,13 @@ jobs:
           Write-Host "======================================================="
           Write-Host "✅ READY TO CONNECT!"
           Write-Host ""
-          Write-Host "📋 STEP 1: Install cloudflared on YOUR local machine"
-          Write-Host "   Download from: https://github.com/cloudflare/cloudflared/releases/latest"
+          Write-Host "🌐 Open this URL in your browser:"
+          Write-Host "   $tunnelUrl"
           Write-Host ""
-          Write-Host "📋 STEP 2: Run this command on YOUR local machine:"
-          Write-Host "   cloudflared access tcp --hostname $tunnelUrl --url localhost:9999"
+          Write-Host "   That's it! You'll see the Windows desktop right in"
+          Write-Host "   your browser. No extra software needed."
           Write-Host ""
-          Write-Host "📋 STEP 3: Open your RDP client and connect to:"
-          Write-Host "   🔗 Address: localhost:9999"
-          Write-Host "   👤 Username: tester"
-          Write-Host "   🔑 Password: $env:RDP_PASSWORD"
-          Write-Host ""
+          Write-Host "   VNC Password (if prompted): tester123"
           Write-Host "======================================================="
 
           Write-Host ""
