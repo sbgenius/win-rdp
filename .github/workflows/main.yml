@@ -5,8 +5,8 @@ on:
 jobs:
   rdp-test:
     runs-on: windows-latest
+    timeout-minutes: 360 # Max 6 hours
     env:
-      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
       # Feel free to change this password, but Windows requires it to be complex!
       RDP_PASSWORD: "SuperSecretPassword123!" 
     steps:
@@ -22,49 +22,56 @@ jobs:
           New-LocalUser -Name "tester" -Password $Password
           Add-LocalGroupMember -Group "Administrators" -Member "tester"
 
-      - name: Download & Install ngrok
-        run: choco install ngrok -y
-
-      - name: Authenticate ngrok
-        run: ngrok authtoken $env:NGROK_AUTH_TOKEN
-
-      - name: Start Tunnel & Print URL
+      - name: Download cloudflared
         run: |
-          # Start ngrok and log output so we can see why it crashes
-          Start-Process -FilePath "ngrok" -ArgumentList "tcp 3389 --log stdout" -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok.err" -WindowStyle Hidden
-          
-          # Wait up to 15 seconds for the tunnel to establish
-          $success = $false
-          for ($i=1; $i -le 60; $i++) {
-            try {
-              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -ErrorAction Stop
-              $json = $response.Content | ConvertFrom-Json
-              $url = $json.tunnels[0].public_url
-              if ($url) {
-                $success = $true
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+
+      - name: Start Cloudflare Tunnel & Print Connection Info
+        run: |
+          # Start cloudflared in the background, tunneling RDP (port 3389)
+          # Quick tunnels require no account, no token, and are completely free
+          Start-Process -FilePath ".\cloudflared.exe" -ArgumentList "tunnel --url tcp://localhost:3389" -RedirectStandardOutput "cf_stdout.log" -RedirectStandardError "cf_stderr.log" -WindowStyle Hidden
+
+          # Wait for cloudflared to establish the tunnel and print the URL
+          Write-Host "Waiting for Cloudflare Tunnel to start..."
+          $tunnelUrl = $null
+          for ($i = 1; $i -le 30; $i++) {
+            Start-Sleep -Seconds 2
+            if (Test-Path "cf_stderr.log") {
+              $logContent = Get-Content "cf_stderr.log" -Raw
+              # cloudflared prints the tunnel URL to stderr
+              if ($logContent -match "(https://[a-zA-Z0-9\-]+\.trycloudflare\.com)") {
+                $tunnelUrl = $matches[1]
                 break
               }
-            } catch {
-              Start-Sleep -Seconds 1
             }
           }
-          
-          if (-not $success) {
-            Write-Host "❌ Failed to start ngrok! Here are the logs:"
+
+          if (-not $tunnelUrl) {
+            Write-Host "❌ Failed to start Cloudflare Tunnel! Here are the logs:"
             Write-Host "---- STDOUT ----"
-            Get-Content ngrok.log
+            if (Test-Path "cf_stdout.log") { Get-Content "cf_stdout.log" }
             Write-Host "---- STDERR ----"
-            Get-Content ngrok.err
+            if (Test-Path "cf_stderr.log") { Get-Content "cf_stderr.log" }
             exit 1
           }
-          
+
           Write-Host "======================================================="
           Write-Host "✅ READY TO CONNECT!"
-          Write-Host "💻 Open your Remote Desktop app and connect to:"
-          Write-Host "🔗 IP/URL: $url"
-          Write-Host "👤 Username: tester"
-          Write-Host "🔑 Password: $env:RDP_PASSWORD"
+          Write-Host ""
+          Write-Host "📋 STEP 1: Install cloudflared on YOUR local machine"
+          Write-Host "   Download from: https://github.com/cloudflare/cloudflared/releases/latest"
+          Write-Host ""
+          Write-Host "📋 STEP 2: Run this command on YOUR local machine:"
+          Write-Host "   cloudflared access tcp --hostname $tunnelUrl --url localhost:9999"
+          Write-Host ""
+          Write-Host "📋 STEP 3: Open your RDP client and connect to:"
+          Write-Host "   🔗 Address: localhost:9999"
+          Write-Host "   👤 Username: tester"
+          Write-Host "   🔑 Password: $env:RDP_PASSWORD"
+          Write-Host ""
           Write-Host "======================================================="
-          
+
+          Write-Host ""
           Write-Host "Keeping the runner alive... (Cancel the workflow manually when done)"
           while ($true) { Start-Sleep -Seconds 60 }
