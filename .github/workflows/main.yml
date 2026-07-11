@@ -1,0 +1,54 @@
+name: Windows RDP Testing
+on: 
+  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+
+jobs:
+  rdp-test:
+    runs-on: windows-latest
+    env:
+      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      # Feel free to change this password, but Windows requires it to be complex!
+      RDP_PASSWORD: "SuperSecretPassword123!" 
+    steps:
+      - name: Enable Remote Desktop
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+
+      - name: Create User Account
+        run: |
+          $Password = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          New-LocalUser -Name "tester" -Password $Password
+          Add-LocalGroupMember -Group "Administrators" -Member "tester"
+
+      - name: Download & Install ngrok
+        run: choco install ngrok -y
+
+      - name: Authenticate ngrok
+        run: ngrok authtoken $env:NGROK_AUTH_TOKEN
+
+      - name: Start Tunnel & Print URL
+        run: |
+          # Start ngrok in the background
+          Start-Process -FilePath "ngrok" -ArgumentList "tcp 3389" -WindowStyle Hidden
+          
+          # Wait a few seconds for the tunnel to establish
+          Start-Sleep -Seconds 5
+          
+          # Ask the local ngrok API what our public URL is
+          $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing
+          $json = $response.Content | ConvertFrom-Json
+          $url = $json.tunnels[0].public_url
+          
+          Write-Host "======================================================="
+          Write-Host "✅ READY TO CONNECT!"
+          Write-Host "💻 Open your Remote Desktop app and connect to:"
+          Write-Host "🔗 IP/URL: $url"
+          Write-Host "👤 Username: tester"
+          Write-Host "🔑 Password: $env:RDP_PASSWORD"
+          Write-Host "======================================================="
+          
+          # Keep the runner alive for up to 6 hours (GitHub's maximum)
+          Write-Host "Keeping the runner alive... (Cancel the workflow manually when done)"
+          while ($true) { Start-Sleep -Seconds 60 }
