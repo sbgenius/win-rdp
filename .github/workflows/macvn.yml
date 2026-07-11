@@ -14,6 +14,10 @@ jobs:
           CURRENT_USER=$(whoami)
           echo "Current user: $CURRENT_USER"
 
+          # Create a new admin user with a known password for VNC login
+          sudo sysadminctl -addUser tester -password tester123 -admin
+          echo "✅ Created user 'tester' with password 'tester123'"
+
           # Grant Screen Recording permission via TCC database (required for VNC)
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           TIMESTAMP=$(date +%s)
