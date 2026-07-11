@@ -14,25 +14,34 @@ jobs:
           CURRENT_USER=$(whoami)
           echo "Current user: $CURRENT_USER"
 
-          # Reset the runner user's password (this user already has the active GUI session)
-          sudo sysadminctl -resetPasswordFor "$CURRENT_USER" -newPassword tester123
-          echo "✅ Password for '$CURRENT_USER' set to 'tester123'"
-
           # Set screen resolution to 1920x1080
           brew install screenresolution 2>/dev/null || true
           screenresolution set 1920x1080x32 2>/dev/null || true
-          echo "✅ Resolution set"
 
-          # Grant Screen Recording permission via TCC database (required for VNC)
-          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          TIMESTAMP=$(date +%s)
+          # Try every method to set runner's password
+          echo "--- Attempting to set password via sysadminctl ---"
+          sudo sysadminctl -resetPasswordFor "$CURRENT_USER" -newPassword tester123 2>&1 || true
           
-          # Grant screen capture permission to the screen sharing services
+          echo "--- Attempting to set password via dscl ---"
+          sudo dscl . -passwd /Users/$CURRENT_USER "" "tester123" 2>&1 || true
+          
+          echo "--- Attempting to set password via expect + passwd ---"
+          expect << 'EXPECT_EOF' || true
+          spawn sudo passwd runner
+          expect "New password:"
+          send "tester123\r"
+          expect "Retype new password:"
+          send "tester123\r"
+          expect eof
+          EXPECT_EOF
+
+          # Grant Screen Recording permission via TCC database
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
           for service_id in "com.apple.screensharing" "com.apple.screensharingd" "com.apple.RemoteManagement" "com.apple.remotemanagementd"; do
             sudo sqlite3 "$TCC_DB" \
               "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceScreenCapture','$service_id',0,2,0,1,0,0);" 2>/dev/null || true
           done
-          echo "✅ TCC Screen Recording permissions granted"
+          echo "✅ TCC permissions granted"
 
           # Enable Remote Management & VNC via kickstart
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
@@ -43,41 +52,28 @@ jobs:
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw tester123 || true
 
-          # Enable and force-start Screen Sharing via launchctl
+          # FORCE VNC legacy mode (password-only, no username required)
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+          
+          # Restart Screen Sharing to pick up the new settings
           sudo launchctl enable system/com.apple.screensharing
           sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
-
-          # Also try the legacy method
-          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false 2>/dev/null || true
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
 
-          # Wait for VNC to start
+          # Restart ARD agent to pick up VNC legacy settings
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent || true
+
           sleep 8
 
-          # Check if VNC is listening on port 5900
+          # Check if VNC is listening
           if sudo lsof -i :5900 > /dev/null 2>&1; then
             echo "✅ VNC server is running on port 5900"
           else
-            echo "⚠️ VNC not on 5900, checking all listening ports for VNC-related services..."
-            sudo lsof -i -P | grep -i -E "screen|vnc|ard|remote" || true
-            echo ""
-            echo "Checking service status..."
-            sudo launchctl list | grep -i screen || true
-            sudo launchctl print system/com.apple.screensharing 2>/dev/null || true
-            
-            # Last resort: try starting screensharingd directly
-            echo "Attempting direct start of screensharingd..."
-            sudo /System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd &
-            sleep 5
-            
-            if sudo lsof -i :5900 > /dev/null 2>&1; then
-              echo "✅ VNC server is now running on port 5900 (direct start)"
-            else
-              echo "❌ VNC server could not be started."
-              echo "All listening TCP ports:"
-              sudo lsof -i -P -sTCP:LISTEN | head -30 || true
-              exit 1
-            fi
+            echo "❌ VNC server failed to start"
+            sudo lsof -i -P -sTCP:LISTEN | head -20 || true
+            exit 1
           fi
 
       - name: Setup Python websockify & Download noVNC
