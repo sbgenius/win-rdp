@@ -11,10 +11,8 @@ jobs:
     steps:
       - name: Enable Screen Sharing (VNC)
         run: |
-          # Set a password for the current user (required for VNC login)
           CURRENT_USER=$(whoami)
           echo "Current user: $CURRENT_USER"
-          sudo dscl . -passwd /Users/$CURRENT_USER "tester123"
 
           # Enable Remote Management & VNC via kickstart
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
@@ -30,7 +28,7 @@ jobs:
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
 
           # Wait for VNC to start
-          sleep 3
+          sleep 5
 
           # Check if VNC is listening on port 5900
           if lsof -i :5900 > /dev/null 2>&1; then
