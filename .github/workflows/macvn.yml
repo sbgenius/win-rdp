@@ -14,9 +14,14 @@ jobs:
           CURRENT_USER=$(whoami)
           echo "Current user: $CURRENT_USER"
 
-          # Create a new admin user with a known password for VNC login
-          sudo sysadminctl -addUser tester -password tester123 -admin
-          echo "✅ Created user 'tester' with password 'tester123'"
+          # Reset the runner user's password (this user already has the active GUI session)
+          sudo sysadminctl -resetPasswordFor "$CURRENT_USER" -newPassword tester123
+          echo "✅ Password for '$CURRENT_USER' set to 'tester123'"
+
+          # Set screen resolution to 1920x1080
+          brew install screenresolution 2>/dev/null || true
+          screenresolution set 1920x1080x32 2>/dev/null || true
+          echo "✅ Resolution set"
 
           # Grant Screen Recording permission via TCC database (required for VNC)
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
@@ -139,7 +144,8 @@ jobs:
           echo "   That's it! You'll see the macOS desktop right in"
           echo "   your browser. No extra software needed."
           echo ""
-          echo "   VNC Password (if prompted): tester123"
+          echo "   👤 Username: runner"
+          echo "   🔑 Password: tester123"
           echo "======================================================="
 
           echo ""
