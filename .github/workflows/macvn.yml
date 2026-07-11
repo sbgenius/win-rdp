@@ -73,7 +73,7 @@ jobs:
 
       - name: Setup Python websockify & Download noVNC
         run: |
-          pip3 install websockify
+          pip3 install --break-system-packages websockify
 
           # Download noVNC (the browser-based VNC client)
           curl -L "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz" -o novnc.tar.gz
