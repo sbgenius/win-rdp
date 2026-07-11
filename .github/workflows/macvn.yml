@@ -1,0 +1,125 @@
+name: macOS VNC Testing
+on: 
+  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+
+jobs:
+  vnc-test:
+    runs-on: macos-latest
+    timeout-minutes: 360 # Max 6 hours
+    env:
+      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+    steps:
+      - name: Enable Screen Sharing (VNC)
+        run: |
+          # Set a password for the current user (required for VNC login)
+          CURRENT_USER=$(whoami)
+          echo "Current user: $CURRENT_USER"
+          sudo dscl . -passwd /Users/$CURRENT_USER "tester123"
+
+          # Enable Remote Management & VNC via kickstart
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -restart -agent -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw tester123 || true
+
+          # Also enable via launchctl as a fallback
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false 2>/dev/null || true
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+
+          # Wait for VNC to start
+          sleep 3
+
+          # Check if VNC is listening on port 5900
+          if lsof -i :5900 > /dev/null 2>&1; then
+            echo "✅ VNC server is running on port 5900"
+          else
+            echo "⚠️ VNC not detected on port 5900 yet, checking processes..."
+            ps aux | grep -i vnc || true
+            ps aux | grep -i screensharing || true
+            ps aux | grep -i ARDAgent || true
+            
+            # Try one more time with a longer wait
+            sleep 5
+            if lsof -i :5900 > /dev/null 2>&1; then
+              echo "✅ VNC server is now running on port 5900"
+            else
+              echo "❌ VNC server failed to start. Dumping debug info..."
+              sudo launchctl list | grep -i screen || true
+              sudo launchctl list | grep -i remote || true
+              exit 1
+            fi
+          fi
+
+      - name: Setup Python websockify & Download noVNC
+        run: |
+          pip3 install websockify
+
+          # Download noVNC (the browser-based VNC client)
+          curl -L "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz" -o novnc.tar.gz
+          tar xzf novnc.tar.gz
+          mv noVNC-1.5.0 noVNC
+
+          # Create a simple redirect so opening the root URL goes straight to the VNC viewer
+          echo '<html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=tester123"></head></html>' > noVNC/index.html
+
+      - name: Install & Configure ngrok
+        run: |
+          brew install ngrok
+          ngrok config add-authtoken $NGROK_AUTH_TOKEN
+
+      - name: Start noVNC & ngrok Tunnel
+        run: |
+          # Start websockify (bridges browser websockets to VNC on port 5900)
+          python3 -m websockify --web=./noVNC 6080 localhost:5900 &
+          WEBSOCKIFY_PID=$!
+          sleep 3
+
+          # Verify websockify is running
+          if lsof -i :6080 > /dev/null 2>&1; then
+            echo "✅ websockify is running on port 6080"
+          else
+            echo "❌ websockify failed to start!"
+            exit 1
+          fi
+
+          # Start ngrok HTTP tunnel
+          ngrok http 6080 --log stdout > ngrok.log 2>&1 &
+          NGROK_PID=$!
+
+          # Wait for ngrok to start and grab the URL from its local API
+          echo "Waiting for ngrok tunnel..."
+          TUNNEL_URL=""
+          for i in $(seq 1 20); do
+            sleep 2
+            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; data=json.load(sys.stdin); print(data['tunnels'][0]['public_url'])" 2>/dev/null) || true
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            echo "  Attempt $i/20 - ngrok not ready yet..."
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "❌ Failed to start ngrok! Here are the logs:"
+            cat ngrok.log 2>/dev/null || true
+            exit 1
+          fi
+
+          echo ""
+          echo "======================================================="
+          echo "✅ READY TO CONNECT!"
+          echo ""
+          echo "🌐 Open this URL in your browser:"
+          echo "   $TUNNEL_URL"
+          echo ""
+          echo "   That's it! You'll see the macOS desktop right in"
+          echo "   your browser. No extra software needed."
+          echo ""
+          echo "   VNC Password (if prompted): tester123"
+          echo "======================================================="
+
+          echo ""
+          echo "Keeping the runner alive... (Cancel the workflow manually when done)"
+          while true; do sleep 60; done
