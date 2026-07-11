@@ -46,7 +46,7 @@ jobs:
           sleep 8
 
           # Check if VNC is listening on port 5900
-          if lsof -i :5900 > /dev/null 2>&1; then
+          if sudo lsof -i :5900 > /dev/null 2>&1; then
             echo "✅ VNC server is running on port 5900"
           else
             echo "⚠️ VNC not on 5900, checking all listening ports for VNC-related services..."
@@ -61,7 +61,7 @@ jobs:
             sudo /System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd &
             sleep 5
             
-            if lsof -i :5900 > /dev/null 2>&1; then
+            if sudo lsof -i :5900 > /dev/null 2>&1; then
               echo "✅ VNC server is now running on port 5900 (direct start)"
             else
               echo "❌ VNC server could not be started."
