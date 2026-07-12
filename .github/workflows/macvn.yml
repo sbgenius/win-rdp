@@ -9,15 +9,55 @@ jobs:
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
     steps:
-      - name: Prevent Display Sleep
+      - name: Wake Display & Prevent Sleep
         run: |
-          # Keep the display and system awake (prevents black screen)
+          # Disable ALL sleep via pmset
+          sudo pmset -a displaysleep 0
+          sudo pmset -a sleep 0
+          sudo pmset -a disksleep 0
+          sudo pmset -a hibernatemode 0
+
+          # Keep the system and display awake
           caffeinate -d -i -s &
           echo "✅ caffeinate running (PID $!)"
 
           # Disable screensaver
           defaults write com.apple.screensaver idleTime -int 0
           defaults -currentHost write com.apple.screensaver idleTime -int 0
+
+          # Disable screen lock
+          sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true
+          defaults write com.apple.loginwindow autoLoginUser runner 2>/dev/null || true
+
+          # Force Finder to activate (ensures desktop is rendering)
+          osascript -e 'tell application "Finder" to activate' 2>/dev/null || true
+
+          # Simulate mouse movement to wake display
+          osascript -e 'tell application "System Events" to key code 63' 2>/dev/null || true
+
+          # Display diagnostics
+          echo "--- Display info ---"
+          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
+          echo ""
+          echo "--- Power settings ---"
+          pmset -g | head -10 || true
+          echo ""
+          echo "--- WindowServer check ---"
+          ps aux | grep -i WindowServer | grep -v grep || echo "⚠️ WindowServer not found!"
+
+          # Take a diagnostic screenshot
+          screencapture -x /tmp/screen_test.png 2>/dev/null || true
+          if [ -f /tmp/screen_test.png ]; then
+            FILE_SIZE=$(stat -f%z /tmp/screen_test.png 2>/dev/null || echo 0)
+            echo "📸 Screenshot captured: ${FILE_SIZE} bytes"
+            if [ "$FILE_SIZE" -lt 1000 ]; then
+              echo "⚠️ Screenshot is very small - display may not be rendering"
+            else
+              echo "✅ Display appears to be rendering content"
+            fi
+          else
+            echo "⚠️ screencapture failed - screen recording might be blocked"
+          fi
 
       - name: Create User & Grant Screen Sharing Access
         run: |
