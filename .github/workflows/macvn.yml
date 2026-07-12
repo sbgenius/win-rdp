@@ -9,65 +9,73 @@ jobs:
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
     steps:
-      - name: Enable Screen Sharing (VNC)
+      - name: Prevent Display Sleep
         run: |
-          CURRENT_USER=$(whoami)
-          echo "Current user: $CURRENT_USER"
+          # Keep the display and system awake (prevents black screen)
+          caffeinate -d -i -s &
+          echo "✅ caffeinate running (PID $!)"
 
-          # Set screen resolution to 1920x1080
-          brew install screenresolution 2>/dev/null || true
-          screenresolution set 1920x1080x32 2>/dev/null || true
+          # Disable screensaver
+          defaults write com.apple.screensaver idleTime -int 0
+          defaults -currentHost write com.apple.screensaver idleTime -int 0
 
-          # Try every method to set runner's password
-          echo "--- Attempting to set password via sysadminctl ---"
-          sudo sysadminctl -resetPasswordFor "$CURRENT_USER" -newPassword tester123 2>&1 || true
-          
-          echo "--- Attempting to set password via dscl ---"
-          sudo dscl . -passwd /Users/$CURRENT_USER "" "tester123" 2>&1 || true
-          
-          echo "--- Attempting to set password via expect + passwd ---"
-          expect << 'EXPECT_EOF' || true
-          spawn sudo passwd runner
-          expect "New password:"
-          send "tester123\r"
-          expect "Retype new password:"
-          send "tester123\r"
-          expect eof
-          EXPECT_EOF
+      - name: Create User & Grant Screen Sharing Access
+        run: |
+          # Create a new admin user with a known password
+          # (sysadminctl works for NEW users, unlike dscl/passwd for existing users)
+          sudo sysadminctl -addUser tester -password tester123 -admin
+          echo "✅ Created user 'tester'"
 
-          # Grant Screen Recording permission via TCC database
+          # Add tester to the screen sharing access group
+          sudo dseditgroup -o create -q com.apple.access_screensharing 2>/dev/null || true
+          sudo dseditgroup -o edit -a tester -t user com.apple.access_screensharing
+          echo "✅ Added 'tester' to screen sharing group"
+
+          # Also add the runner user
+          sudo dseditgroup -o edit -a runner -t user com.apple.access_screensharing 2>/dev/null || true
+
+      - name: Grant TCC Screen Recording Permissions
+        run: |
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          for service_id in "com.apple.screensharing" "com.apple.screensharingd" "com.apple.RemoteManagement" "com.apple.remotemanagementd"; do
+          
+          # Grant screen capture permission to all relevant services
+          for service_id in \
+            "com.apple.screensharing" \
+            "com.apple.screensharingd" \
+            "com.apple.RemoteManagement" \
+            "com.apple.remotemanagementd" \
+            "/System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd"; do
             sudo sqlite3 "$TCC_DB" \
               "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceScreenCapture','$service_id',0,2,0,1,0,0);" 2>/dev/null || true
           done
+          
+          # Also grant post-notification permission
+          for service_id in "com.apple.screensharing" "com.apple.screensharingd"; do
+            sudo sqlite3 "$TCC_DB" \
+              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServicePostEvent','$service_id',0,2,0,1,0,0);" 2>/dev/null || true
+          done
           echo "✅ TCC permissions granted"
 
-          # Enable Remote Management & VNC via kickstart
+      - name: Enable Screen Sharing
+        run: |
+          # Enable Remote Management via kickstart
+          # NOTE: -setvncpw is broken on Sonoma/Sequoia, so we rely on ARD auth (username/password)
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -access -on \
             -configure -allowAccessFor -allUsers \
-            -configure -restart -agent -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw tester123 || true
+            -configure -restart -agent -privs -all || true
 
-          # FORCE VNC legacy mode (password-only, no username required)
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled -bool true
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
-          
-          # Restart Screen Sharing to pick up the new settings
+          # Enable Screen Sharing service
           sudo launchctl enable system/com.apple.screensharing
           sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
 
-          # Restart ARD agent to pick up VNC legacy settings
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -restart -agent || true
-
+          # Wait for VNC to start
+          echo "Waiting for Screen Sharing to start..."
           sleep 8
 
-          # Check if VNC is listening
+          # Verify VNC is running
           if sudo lsof -i :5900 > /dev/null 2>&1; then
             echo "✅ VNC server is running on port 5900"
           else
@@ -76,17 +84,24 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Python websockify & Download noVNC
+      - name: Set Screen Resolution
+        run: |
+          brew install screenresolution 2>/dev/null || true
+          screenresolution set 1920x1080x32 2>/dev/null || true
+          echo "Current resolution:"
+          screenresolution get 2>/dev/null || system_profiler SPDisplaysDataType | grep Resolution || true
+
+      - name: Setup noVNC & websockify
         run: |
           pip3 install --break-system-packages websockify
 
-          # Download noVNC (the browser-based VNC client)
+          # Download noVNC
           curl -L "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz" -o novnc.tar.gz
           tar xzf novnc.tar.gz
           mv noVNC-1.5.0 noVNC
 
-          # Create a simple redirect so opening the root URL goes straight to the VNC viewer
-          echo '<html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=tester123"></head></html>' > noVNC/index.html
+          # Create index that auto-connects (no password in URL since ARD auth needs username+password dialog)
+          echo '<html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote"></head></html>' > noVNC/index.html
 
       - name: Install & Configure ngrok
         run: |
@@ -95,12 +110,10 @@ jobs:
 
       - name: Start noVNC & ngrok Tunnel
         run: |
-          # Start websockify (bridges browser websockets to VNC on port 5900)
+          # Start websockify
           python3 -m websockify --web=./noVNC 6080 localhost:5900 &
-          WEBSOCKIFY_PID=$!
           sleep 3
 
-          # Verify websockify is running
           if lsof -i :6080 > /dev/null 2>&1; then
             echo "✅ websockify is running on port 6080"
           else
@@ -110,9 +123,8 @@ jobs:
 
           # Start ngrok HTTP tunnel
           ngrok http 6080 --log stdout > ngrok.log 2>&1 &
-          NGROK_PID=$!
 
-          # Wait for ngrok to start and grab the URL from its local API
+          # Wait for ngrok URL
           echo "Waiting for ngrok tunnel..."
           TUNNEL_URL=""
           for i in $(seq 1 20); do
@@ -125,7 +137,7 @@ jobs:
           done
 
           if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ Failed to start ngrok! Here are the logs:"
+            echo "❌ Failed to start ngrok!"
             cat ngrok.log 2>/dev/null || true
             exit 1
           fi
@@ -137,11 +149,11 @@ jobs:
           echo "🌐 Open this URL in your browser:"
           echo "   $TUNNEL_URL"
           echo ""
-          echo "   That's it! You'll see the macOS desktop right in"
-          echo "   your browser. No extra software needed."
-          echo ""
-          echo "   👤 Username: runner"
+          echo "   When the credentials dialog appears, enter:"
+          echo "   👤 Username: tester"
           echo "   🔑 Password: tester123"
+          echo ""
+          echo "   Then click 'Send Credentials'"
           echo "======================================================="
 
           echo ""
