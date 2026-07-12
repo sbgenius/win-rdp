@@ -9,6 +9,9 @@ jobs:
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Wake Display & Prevent Sleep
         run: |
           # Disable ALL sleep via pmset
@@ -27,37 +30,34 @@ jobs:
 
           # Disable screen lock
           sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true
-          defaults write com.apple.loginwindow autoLoginUser runner 2>/dev/null || true
 
-          # Force Finder to activate (ensures desktop is rendering)
-          osascript -e 'tell application "Finder" to activate' 2>/dev/null || true
-
-          # Simulate mouse movement to wake display
+          # Simulate user activity to wake display
           osascript -e 'tell application "System Events" to key code 63' 2>/dev/null || true
+
+          # Force Finder to show desktop
+          osascript -e 'tell application "Finder" to activate' 2>/dev/null || true
+          sleep 1
+
+          # Open a visible Terminal window so there's definitely something on screen
+          osascript -e '
+            tell application "Terminal"
+              activate
+              do script "echo DISPLAY IS WORKING && sw_vers && echo && system_profiler SPHardwareDataType | head -20"
+            end tell
+          ' 2>/dev/null || true
 
           # Display diagnostics
           echo "--- Display info ---"
-          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
-          echo ""
-          echo "--- Power settings ---"
-          pmset -g | head -10 || true
+          system_profiler SPDisplaysDataType 2>/dev/null || true
           echo ""
           echo "--- WindowServer check ---"
           ps aux | grep -i WindowServer | grep -v grep || echo "⚠️ WindowServer not found!"
-
-          # Take a diagnostic screenshot
-          screencapture -x /tmp/screen_test.png 2>/dev/null || true
-          if [ -f /tmp/screen_test.png ]; then
-            FILE_SIZE=$(stat -f%z /tmp/screen_test.png 2>/dev/null || echo 0)
-            echo "📸 Screenshot captured: ${FILE_SIZE} bytes"
-            if [ "$FILE_SIZE" -lt 1000 ]; then
-              echo "⚠️ Screenshot is very small - display may not be rendering"
-            else
-              echo "✅ Display appears to be rendering content"
-            fi
-          else
-            echo "⚠️ screencapture failed - screen recording might be blocked"
-          fi
+          echo ""
+          echo "--- Console user ---"
+          stat -f '%Su' /dev/console 2>/dev/null || echo "unknown"
+          echo ""
+          echo "--- GUI session ---"
+          who | head -5 || true
 
       - name: Create User & Grant Screen Sharing Access
         run: |
@@ -130,6 +130,39 @@ jobs:
           screenresolution set 1920x1080x32 2>/dev/null || true
           echo "Current resolution:"
           screenresolution get 2>/dev/null || system_profiler SPDisplaysDataType | grep Resolution || true
+
+      - name: Capture Diagnostic Screenshot
+        run: |
+          sleep 2
+          # Try multiple screenshot methods
+          screencapture -x /tmp/screenshot.png 2>/dev/null || true
+          
+          # Also try with sudo
+          sudo screencapture -x /tmp/screenshot_sudo.png 2>/dev/null || true
+
+          # Copy to repo root for artifact upload
+          mkdir -p screenshots
+          cp /tmp/screenshot.png screenshots/screen_normal.png 2>/dev/null || true
+          cp /tmp/screenshot_sudo.png screenshots/screen_sudo.png 2>/dev/null || true
+
+          # Report sizes
+          echo "--- Screenshot file sizes ---"
+          ls -la screenshots/ 2>/dev/null || echo "No screenshots captured"
+          
+          for f in screenshots/*.png; do
+            if [ -f "$f" ]; then
+              SIZE=$(stat -f%z "$f" 2>/dev/null || echo 0)
+              echo "$f: $SIZE bytes"
+            fi
+          done
+
+      - name: Upload Screenshots
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-screenshots
+          path: screenshots/
+          retention-days: 1
 
       - name: Setup noVNC & websockify
         run: |
