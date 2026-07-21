@@ -9,12 +9,16 @@ jobs:
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
     steps:
-      - name: Install XFCE Desktop, VNC server, and Xvfb
+      - name: Install MATE Desktop, Mint Theming, VNC server, and Xvfb
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xfce4 \
-            xfce4-goodies \
+            mate-desktop-environment \
+            mate-desktop-environment-extras \
+            mint-themes \
+            mint-y-icons \
+            mint-x-icons \
+            fonts-noto \
             xvfb \
             x11vnc \
             dbus-x11 \
