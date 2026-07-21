@@ -37,26 +37,41 @@ jobs:
             -restart -agent -privs -all
           echo "✅ VNC server enabled on port 5900"
 
-      - name: Install & start ngrok tunnel
-        env:
-          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      - name: Install bore tunnel
         run: |
-          brew install ngrok
-          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
-          ngrok tcp 5900 --log=stdout --log-format=json &
+          # Download bore (free, no account needed, no credit card)
+          BORE_URL=$(curl -s https://api.github.com/repos/ekzhang/bore/releases/latest \
+            | python3 -c "
+          import sys, json
+          assets = json.load(sys.stdin)['assets']
+          for a in assets:
+              name = a['name']
+              if 'apple-darwin' in name and ('aarch64' in name or 'x86_64' in name):
+                  print(a['browser_download_url'])
+                  break
+          ")
+          echo "Downloading: $BORE_URL"
+          curl -sL "$BORE_URL" | tar xz
+          chmod +x bore
+          sudo mv bore /usr/local/bin/bore
+          bore --version
+
+      - name: Start VNC tunnel
+        run: |
+          # Start bore tunnel in background, capture output
+          bore local 5900 --to bore.pub > /tmp/bore.log 2>&1 &
+          BORE_PID=$!
           sleep 5
 
-          # Grab the public tunnel URL
-          TUNNEL_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          tunnels = data.get('tunnels', [])
-          if tunnels:
-              print(tunnels[0]['public_url'])
-          else:
-              print('ERROR: No tunnels found')
-              sys.exit(1)
-          ")
+          # Parse the assigned port from bore output
+          cat /tmp/bore.log
+          BORE_PORT=$(grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log | head -1 | cut -d: -f2)
+
+          if [ -z "$BORE_PORT" ]; then
+            echo "❌ Failed to get bore tunnel port. Log output:"
+            cat /tmp/bore.log
+            exit 1
+          fi
 
           echo ""
           echo "============================================"
@@ -65,26 +80,26 @@ jobs:
           echo ""
           echo "  Connect with any VNC client to:"
           echo ""
-          echo "    $TUNNEL_URL"
+          echo "    bore.pub:${BORE_PORT}"
           echo ""
           echo "  Password: (the one you set in workflow input)"
           echo ""
           echo "  Recommended VNC clients:"
           echo "    • macOS:   built-in Screen Sharing app"
+          echo "               (Finder → Go → Connect to Server)"
+          echo "               vnc://bore.pub:${BORE_PORT}"
           echo "    • Windows: RealVNC Viewer, TightVNC"
           echo "    • Linux:   Remmina, TigerVNC"
-          echo "    • iOS:     RealVNC Viewer"
-          echo "    • Android: bVNC"
+          echo "    • iOS/Android: RealVNC Viewer"
           echo ""
-          echo "  Session timeout: ${{ github.event.inputs.session_timeout }} minutes"
+          echo "  Session timeout: ${{ github.event.inputs.session_timeout }} min"
           echo "============================================"
 
       - name: Keep alive until timeout
         run: |
-          echo "⏳ Session is active. Will auto-terminate after ${{ github.event.inputs.session_timeout }} minutes."
-          echo "   Or cancel the workflow manually when done."
+          echo "⏳ Session active. Auto-terminates in ${{ github.event.inputs.session_timeout }} min."
+          echo "   Cancel the workflow manually when you're done."
           echo ""
-          # Keep the runner alive — sleep in chunks so logs stay updated
           TIMEOUT=$(( ${{ github.event.inputs.session_timeout }} * 60 ))
           ELAPSED=0
           INTERVAL=60
@@ -92,6 +107,6 @@ jobs:
             sleep $INTERVAL
             ELAPSED=$((ELAPSED + INTERVAL))
             REMAINING=$(( (TIMEOUT - ELAPSED) / 60 ))
-            echo "⏱️  ${REMAINING} minutes remaining..."
+            echo "⏱️  ${REMAINING} min remaining..."
           done
-          echo "🛑 Session timed out. Goodbye!"
+          echo "🛑 Session timed out."
