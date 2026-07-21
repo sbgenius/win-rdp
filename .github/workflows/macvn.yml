@@ -1,151 +1,33 @@
-name: macOS VNC Testing
+name: macOS Screenshot
 on:
-  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  vnc-test:
-    runs-on: macos-14 # Apple Silicon runner. Use macos-13 if you specifically need Intel.
-    timeout-minutes: 360 # Max 6 hours
-    env:
-      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-      VNC_PASSWORD: tester123
+  screenshot:
+    runs-on: macos-14
     steps:
-      - name: Prevent display sleep
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Take screenshot
         run: |
-          # macOS runners have no physical monitor, so the virtual display can
-          # go to sleep / get power-managed. This is one of the causes of the
-          # "black screen" problem. caffeinate keeps the display, system, and
-          # user-idle state awake for the whole job.
-          nohup caffeinate -disu > caffeinate.log 2>&1 &
-          echo "✅ caffeinate running (pid $!)"
+          # -x = no shutter sound. Saves straight to the repo root, which is
+          # the working directory actions/checkout puts you in.
+          screencapture -x screenshot.png
 
-      - name: Set screen resolution
-        run: |
-          brew install displayplacer 2>&1 | tail -5 || true
-
-          echo "Current display list:"
-          displayplacer list || true
-
-          # Grab the persistent screen id of the first display and force a
-          # sane resolution. Wrapped in || true so a failure here never
-          # kills the job - same "try, fall back gracefully" spirit as the
-          # Windows workflow.
-          SCREEN_ID=$(displayplacer list | grep "Persistent screen id:" | head -1 | awk '{print $4}')
-          if [ -n "$SCREEN_ID" ]; then
-            displayplacer "id:$SCREEN_ID res:1920x1080 scaling:off" \
-              && echo "✅ Resolution set to 1920x1080" \
-              || echo "⚠️ displayplacer failed to apply resolution, continuing with default"
-          else
-            echo "⚠️ Could not detect a screen id, continuing with default resolution"
-          fi
-
-      - name: Enable Screen Sharing (VNC) with legacy password auth
-        run: |
-          KICKSTART=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
-
-          # THIS is the actual fix for the black-screen problem: by default
-          # macOS Screen Sharing only accepts Apple Remote Desktop's
-          # Diffie-Hellman auth. Generic RFB/VNC clients (noVNC, TightVNC,
-          # etc.) can only do classic VNC "legacy" password auth. Without
-          # explicitly turning legacy VNC auth on, third-party viewers either
-          # fail to authenticate properly or connect to a frame buffer that
-          # never actually updates - which looks exactly like a black screen.
-          sudo "$KICKSTART" -configure -clientopts \
-            -setvnclegacy -vnclegacy yes \
-            -setvncpw -vncpw "$VNC_PASSWORD"
-
-          # Turn on Remote Management / Screen Sharing itself and grant the
-          # runner user full privileges.
-          sudo "$KICKSTART" -activate -configure -access -on \
-            -configure -allowAccessFor -allUsers \
-            -configure -restart -agent -privs -all
-
-          # Make sure the launch daemon is actually loaded (kickstart usually
-          # does this, but reloading explicitly avoids stale state from a
-          # previous run on the same image).
-          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
-
-          sleep 3
-          if sudo launchctl list | grep -q com.apple.screensharing; then
-            echo "✅ Screen Sharing (VNC) is running on port 5900"
-          else
-            echo "❌ Screen Sharing does not appear to be running!"
+          if [ ! -s screenshot.png ]; then
+            echo "❌ screenshot.png is empty or missing - screencapture may be TCC-blocked on this runner"
             exit 1
           fi
+          echo "✅ Screenshot captured: $(ls -la screenshot.png)"
 
-      - name: Setup Python websockify & Download noVNC
+      - name: Commit and push screenshot
         run: |
-          # macOS's system python3 is Homebrew-managed (PEP 668), so a plain
-          # pip install will refuse to run. --break-system-packages is safe
-          # here since this VM is thrown away at the end of the job.
-          python3 -m pip install --break-system-packages websockify
-
-          curl -L -o novnc.zip https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip
-          unzip -q novnc.zip
-          mv noVNC-1.5.0 noVNC
-
-          # Redirect root URL straight into the VNC viewer, same as the
-          # Windows workflow.
-          cat > noVNC/index.html <<EOF
-          <html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=${VNC_PASSWORD}"></head></html>
-          EOF
-
-      - name: Install & Configure ngrok
-        run: |
-          brew install ngrok/ngrok/ngrok
-          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
-
-      - name: Start noVNC & ngrok Tunnel
-        run: |
-          # Bridge browser websockets to the native VNC service on 5900.
-          nohup python3 -m websockify --web=./noVNC 6080 localhost:5900 > websockify.log 2>&1 &
-          sleep 3
-
-          if ! lsof -i :6080 > /dev/null 2>&1; then
-            echo "❌ websockify failed to start!"
-            cat websockify.log
-            exit 1
-          fi
-          echo "✅ websockify is running on port 6080"
-
-          # Start ngrok HTTP tunnel (free tier supports HTTP, just not raw TCP).
-          nohup ngrok http 6080 --log stdout > ngrok.log 2> ngrok.err &
-          sleep 2
-
-          echo "Waiting for ngrok tunnel..."
-          TUNNEL_URL=""
-          for i in $(seq 1 20); do
-            sleep 2
-            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys, json; d = json.load(sys.stdin); print(d['tunnels'][0]['public_url'] if d.get('tunnels') else '')" 2>/dev/null)
-            if [ -n "$TUNNEL_URL" ]; then
-              break
-            fi
-            echo "  Attempt $i/20 - ngrok not ready yet..."
-          done
-
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ Failed to start ngrok! Here are the logs:"
-            echo "---- STDOUT ----"
-            cat ngrok.log 2>/dev/null
-            echo "---- STDERR ----"
-            cat ngrok.err 2>/dev/null
-            exit 1
-          fi
-
-          echo ""
-          echo "======================================================="
-          echo "✅ READY TO CONNECT!"
-          echo ""
-          echo "🌐 Open this URL in your browser:"
-          echo "   $TUNNEL_URL"
-          echo ""
-          echo "   That's it! You'll see the macOS desktop right in"
-          echo "   your browser. No extra software needed."
-          echo ""
-          echo "   VNC Password (if prompted): $VNC_PASSWORD"
-          echo "======================================================="
-
-          echo ""
-          echo "Keeping the runner alive... (Cancel the workflow manually when done)"
-          while true; do sleep 60; done
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add screenshot.png
+          git diff --cached --quiet && echo "No changes to commit" || git commit -m "Add screenshot from macOS runner"
+          git push
