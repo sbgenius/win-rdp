@@ -1,208 +1,123 @@
 name: macOS VNC Testing
-on: 
+on:
   workflow_dispatch: # Allows you to trigger this manually from the Actions tab
 
 jobs:
   vnc-test:
-    runs-on: macos-latest
+    runs-on: macos-14 # Apple Silicon runner. Use macos-13 if you specifically need Intel.
     timeout-minutes: 360 # Max 6 hours
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      VNC_PASSWORD: tester123
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Wake Display & Prevent Sleep
+      - name: Prevent display sleep
         run: |
-          # Disable ALL sleep via pmset
-          sudo pmset -a displaysleep 0
-          sudo pmset -a sleep 0
-          sudo pmset -a disksleep 0
-          sudo pmset -a hibernatemode 0
+          # macOS runners have no physical monitor, so the virtual display can
+          # go to sleep / get power-managed. This is one of the causes of the
+          # "black screen" problem. caffeinate keeps the display, system, and
+          # user-idle state awake for the whole job.
+          nohup caffeinate -disu > caffeinate.log 2>&1 &
+          echo "✅ caffeinate running (pid $!)"
 
-          # Keep the system and display awake
-          caffeinate -d -i -s &
-          echo "✅ caffeinate running (PID $!)"
-
-          # Disable screensaver
-          defaults write com.apple.screensaver idleTime -int 0
-          defaults -currentHost write com.apple.screensaver idleTime -int 0
-
-          # Disable screen lock
-          sudo defaults write /Library/Preferences/com.apple.loginwindow DisableScreenLock -bool true
-
-          # Simulate user activity to wake display
-          osascript -e 'tell application "System Events" to key code 63' 2>/dev/null || true
-
-          # Force Finder to show desktop
-          osascript -e 'tell application "Finder" to activate' 2>/dev/null || true
-          sleep 1
-
-          # Open a visible Terminal window so there's definitely something on screen
-          osascript -e '
-            tell application "Terminal"
-              activate
-              do script "echo DISPLAY IS WORKING && sw_vers && echo && system_profiler SPHardwareDataType | head -20"
-            end tell
-          ' 2>/dev/null || true
-
-          # Display diagnostics
-          echo "--- Display info ---"
-          system_profiler SPDisplaysDataType 2>/dev/null || true
-          echo ""
-          echo "--- WindowServer check ---"
-          ps aux | grep -i WindowServer | grep -v grep || echo "⚠️ WindowServer not found!"
-          echo ""
-          echo "--- Console user ---"
-          stat -f '%Su' /dev/console 2>/dev/null || echo "unknown"
-          echo ""
-          echo "--- GUI session ---"
-          who | head -5 || true
-
-      - name: Create User & Grant Screen Sharing Access
+      - name: Set screen resolution
         run: |
-          # Create a new admin user with a known password
-          # (sysadminctl works for NEW users, unlike dscl/passwd for existing users)
-          sudo sysadminctl -addUser tester -password tester123 -admin
-          echo "✅ Created user 'tester'"
+          brew install displayplacer 2>&1 | tail -5 || true
 
-          # Add tester to the screen sharing access group
-          sudo dseditgroup -o create -q com.apple.access_screensharing 2>/dev/null || true
-          sudo dseditgroup -o edit -a tester -t user com.apple.access_screensharing
-          echo "✅ Added 'tester' to screen sharing group"
+          echo "Current display list:"
+          displayplacer list || true
 
-          # Also add the runner user
-          sudo dseditgroup -o edit -a runner -t user com.apple.access_screensharing 2>/dev/null || true
-
-      - name: Grant TCC Screen Recording Permissions
-        run: |
-          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          
-          # Grant screen capture permission to all relevant services
-          for service_id in \
-            "com.apple.screensharing" \
-            "com.apple.screensharingd" \
-            "com.apple.RemoteManagement" \
-            "com.apple.remotemanagementd" \
-            "/System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd"; do
-            sudo sqlite3 "$TCC_DB" \
-              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServiceScreenCapture','$service_id',0,2,0,1,0,0);" 2>/dev/null || true
-          done
-          
-          # Also grant post-notification permission
-          for service_id in "com.apple.screensharing" "com.apple.screensharingd"; do
-            sudo sqlite3 "$TCC_DB" \
-              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, flags) VALUES ('kTCCServicePostEvent','$service_id',0,2,0,1,0,0);" 2>/dev/null || true
-          done
-          echo "✅ TCC permissions granted"
-
-      - name: Enable Screen Sharing
-        run: |
-          # Enable Remote Management via kickstart
-          # NOTE: -setvncpw is broken on Sonoma/Sequoia, so we rely on ARD auth (username/password)
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on \
-            -configure -allowAccessFor -allUsers \
-            -configure -restart -agent -privs -all || true
-
-          # Enable Screen Sharing service
-          sudo launchctl enable system/com.apple.screensharing
-          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-
-          # Wait for VNC to start
-          echo "Waiting for Screen Sharing to start..."
-          sleep 8
-
-          # Verify VNC is running
-          if sudo lsof -i :5900 > /dev/null 2>&1; then
-            echo "✅ VNC server is running on port 5900"
+          # Grab the persistent screen id of the first display and force a
+          # sane resolution. Wrapped in || true so a failure here never
+          # kills the job - same "try, fall back gracefully" spirit as the
+          # Windows workflow.
+          SCREEN_ID=$(displayplacer list | grep "Persistent screen id:" | head -1 | awk '{print $4}')
+          if [ -n "$SCREEN_ID" ]; then
+            displayplacer "id:$SCREEN_ID res:1920x1080 scaling:off" \
+              && echo "✅ Resolution set to 1920x1080" \
+              || echo "⚠️ displayplacer failed to apply resolution, continuing with default"
           else
-            echo "❌ VNC server failed to start"
-            sudo lsof -i -P -sTCP:LISTEN | head -20 || true
+            echo "⚠️ Could not detect a screen id, continuing with default resolution"
+          fi
+
+      - name: Enable Screen Sharing (VNC) with legacy password auth
+        run: |
+          KICKSTART=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+
+          # THIS is the actual fix for the black-screen problem: by default
+          # macOS Screen Sharing only accepts Apple Remote Desktop's
+          # Diffie-Hellman auth. Generic RFB/VNC clients (noVNC, TightVNC,
+          # etc.) can only do classic VNC "legacy" password auth. Without
+          # explicitly turning legacy VNC auth on, third-party viewers either
+          # fail to authenticate properly or connect to a frame buffer that
+          # never actually updates - which looks exactly like a black screen.
+          sudo "$KICKSTART" -configure -clientopts \
+            -setvnclegacy -vnclegacy yes \
+            -setvncpw -vncpw "$VNC_PASSWORD"
+
+          # Turn on Remote Management / Screen Sharing itself and grant the
+          # runner user full privileges.
+          sudo "$KICKSTART" -activate -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -restart -agent -privs -all
+
+          # Make sure the launch daemon is actually loaded (kickstart usually
+          # does this, but reloading explicitly avoids stale state from a
+          # previous run on the same image).
+          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+
+          sleep 3
+          if sudo launchctl list | grep -q com.apple.screensharing; then
+            echo "✅ Screen Sharing (VNC) is running on port 5900"
+          else
+            echo "❌ Screen Sharing does not appear to be running!"
             exit 1
           fi
 
-      - name: Set Screen Resolution
+      - name: Setup Python websockify & Download noVNC
         run: |
-          brew install screenresolution 2>/dev/null || true
-          screenresolution set 1920x1080x32 2>/dev/null || true
-          echo "Current resolution:"
-          screenresolution get 2>/dev/null || system_profiler SPDisplaysDataType | grep Resolution || true
+          # macOS's system python3 is Homebrew-managed (PEP 668), so a plain
+          # pip install will refuse to run. --break-system-packages is safe
+          # here since this VM is thrown away at the end of the job.
+          python3 -m pip install --break-system-packages websockify
 
-      - name: Capture Diagnostic Screenshot
-        run: |
-          sleep 2
-          # Try multiple screenshot methods
-          screencapture -x /tmp/screenshot.png 2>/dev/null || true
-          
-          # Also try with sudo
-          sudo screencapture -x /tmp/screenshot_sudo.png 2>/dev/null || true
-
-          # Copy to repo root for artifact upload
-          mkdir -p screenshots
-          cp /tmp/screenshot.png screenshots/screen_normal.png 2>/dev/null || true
-          cp /tmp/screenshot_sudo.png screenshots/screen_sudo.png 2>/dev/null || true
-
-          # Report sizes
-          echo "--- Screenshot file sizes ---"
-          ls -la screenshots/ 2>/dev/null || echo "No screenshots captured"
-          
-          for f in screenshots/*.png; do
-            if [ -f "$f" ]; then
-              SIZE=$(stat -f%z "$f" 2>/dev/null || echo 0)
-              echo "$f: $SIZE bytes"
-            fi
-          done
-
-      - name: Upload Screenshots
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: macos-screenshots
-          path: screenshots/
-          retention-days: 1
-
-      - name: Setup noVNC & websockify
-        run: |
-          pip3 install --break-system-packages websockify
-
-          # Download noVNC
-          curl -L "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz" -o novnc.tar.gz
-          tar xzf novnc.tar.gz
+          curl -L -o novnc.zip https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip
+          unzip -q novnc.zip
           mv noVNC-1.5.0 noVNC
 
-          # Create index that auto-connects (no password in URL since ARD auth needs username+password dialog)
-          echo '<html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote"></head></html>' > noVNC/index.html
+          # Redirect root URL straight into the VNC viewer, same as the
+          # Windows workflow.
+          cat > noVNC/index.html <<EOF
+          <html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=${VNC_PASSWORD}"></head></html>
+          EOF
 
       - name: Install & Configure ngrok
         run: |
-          brew install ngrok
-          ngrok config add-authtoken $NGROK_AUTH_TOKEN
+          brew install ngrok/ngrok/ngrok
+          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
 
       - name: Start noVNC & ngrok Tunnel
         run: |
-          # Start websockify
-          python3 -m websockify --web=./noVNC 6080 localhost:5900 &
+          # Bridge browser websockets to the native VNC service on 5900.
+          nohup python3 -m websockify --web=./noVNC 6080 localhost:5900 > websockify.log 2>&1 &
           sleep 3
 
-          if lsof -i :6080 > /dev/null 2>&1; then
-            echo "✅ websockify is running on port 6080"
-          else
+          if ! lsof -i :6080 > /dev/null 2>&1; then
             echo "❌ websockify failed to start!"
+            cat websockify.log
             exit 1
           fi
+          echo "✅ websockify is running on port 6080"
 
-          # Start ngrok HTTP tunnel
-          ngrok http 6080 --log stdout > ngrok.log 2>&1 &
+          # Start ngrok HTTP tunnel (free tier supports HTTP, just not raw TCP).
+          nohup ngrok http 6080 --log stdout > ngrok.log 2> ngrok.err &
+          sleep 2
 
-          # Wait for ngrok URL
           echo "Waiting for ngrok tunnel..."
           TUNNEL_URL=""
           for i in $(seq 1 20); do
             sleep 2
-            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys,json; data=json.load(sys.stdin); print(data['tunnels'][0]['public_url'])" 2>/dev/null) || true
+            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys, json; d = json.load(sys.stdin); print(d['tunnels'][0]['public_url'] if d.get('tunnels') else '')" 2>/dev/null)
             if [ -n "$TUNNEL_URL" ]; then
               break
             fi
@@ -210,8 +125,11 @@ jobs:
           done
 
           if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ Failed to start ngrok!"
-            cat ngrok.log 2>/dev/null || true
+            echo "❌ Failed to start ngrok! Here are the logs:"
+            echo "---- STDOUT ----"
+            cat ngrok.log 2>/dev/null
+            echo "---- STDERR ----"
+            cat ngrok.err 2>/dev/null
             exit 1
           fi
 
@@ -222,11 +140,10 @@ jobs:
           echo "🌐 Open this URL in your browser:"
           echo "   $TUNNEL_URL"
           echo ""
-          echo "   When the credentials dialog appears, enter:"
-          echo "   👤 Username: tester"
-          echo "   🔑 Password: tester123"
+          echo "   That's it! You'll see the macOS desktop right in"
+          echo "   your browser. No extra software needed."
           echo ""
-          echo "   Then click 'Send Credentials'"
+          echo "   VNC Password (if prompted): $VNC_PASSWORD"
           echo "======================================================="
 
           echo ""
