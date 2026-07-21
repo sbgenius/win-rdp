@@ -1,61 +1,61 @@
-name: Linux Cinnamon Desktop Testing
+name: Linux RDP Testing
 on:
   workflow_dispatch: # Allows you to trigger this manually from the Actions tab
 
 jobs:
-  cinnamon-test:
+  rdp-test:
     runs-on: ubuntu-latest
     timeout-minutes: 360 # Max 6 hours
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
-      DEBIAN_FRONTEND: noninteractive
     steps:
-      - name: Install Cinnamon Desktop Environment + VNC server
+      - name: Install MATE Desktop, VNC server, and Xvfb
         run: |
           sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mate-desktop-environment \
+            mate-desktop-environment-extras \
+            xvfb \
+            x11vnc \
+            dbus-x11 \
+            python3-pip \
+            unzip \
+            wget
 
-          # Install Cinnamon desktop. This pulls in a full DE (lightdm etc), so
-          # we install noninteractively and then make sure lightdm never
-          # auto-starts and fights with our VNC X server.
-          sudo apt-get install -y cinnamon-desktop-environment dbus-x11 tigervnc-standalone-server tigervnc-common
-
-          sudo systemctl disable lightdm.service || true
-          sudo systemctl stop lightdm.service || true
-
-      - name: Configure VNC (password, resolution, Cinnamon session)
+      - name: Start Virtual Display (1920x1080)
         run: |
-          mkdir -p ~/.vnc
+          Xvfb :1 -screen 0 1920x1080x24 &
+          sleep 3
+          echo "✅ Xvfb started on display :1"
+          echo "DISPLAY=:1" >> $GITHUB_ENV
 
-          # Set the VNC password (matches the Windows workflow's tester123)
-          echo "tester123" | vncpasswd -f > ~/.vnc/passwd
-          chmod 600 ~/.vnc/passwd
-
-          # xstartup: launch a full Cinnamon session inside the VNC X server
-          cat > ~/.vnc/xstartup << 'EOF'
-          #!/bin/bash
-          unset SESSION_MANAGER
-          unset DBUS_SESSION_BUS_ADDRESS
-          export XDG_CURRENT_DESKTOP=X-Cinnamon
-          export XDG_SESSION_TYPE=x11
-          exec dbus-launch --exit-with-session cinnamon-session
-          EOF
-          chmod +x ~/.vnc/xstartup
-
-      - name: Start VNC server at 1920x1080
+      - name: Start MATE Session
         run: |
-          vncserver :1 -geometry 1920x1080 -depth 24 -localhost yes
+          export DISPLAY=:1
+          nohup mate-session > mate-session.log 2>&1 &
+          sleep 5
+          echo "✅ MATE session started"
 
-          # Give Cinnamon a few seconds to actually come up
-          sleep 8
-          vncserver -list
+      - name: Start x11vnc Server
+        run: |
+          export DISPLAY=:1
+          x11vnc -display :1 -forever -shared -rfbport 5900 -passwd tester123 -bg -o x11vnc.log
+          sleep 2
+
+          # Verify x11vnc is running
+          if ! pgrep -x "x11vnc" > /dev/null; then
+            echo "❌ x11vnc failed to start!"
+            cat x11vnc.log
+            exit 1
+          fi
+          echo "✅ x11vnc is running on port 5900"
 
       - name: Setup Python websockify & Download noVNC
         run: |
-          sudo apt-get install -y python3-pip
-          pip3 install --user websockify
+          pip3 install websockify
 
           # Download noVNC (the browser-based VNC client)
-          curl -L -o novnc.zip https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip
+          wget -q "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -O novnc.zip
           unzip -q novnc.zip
           mv noVNC-1.5.0 noVNC
 
@@ -66,23 +66,19 @@ jobs:
 
       - name: Install & Configure ngrok
         run: |
-          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
-            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
-            | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt-get update
-          sudo apt-get install -y ngrok
-          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
+          wget -q "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" -O ngrok.tgz
+          tar xzf ngrok.tgz
+          sudo mv ngrok /usr/local/bin/ngrok
+          ngrok config add-authtoken $NGROK_AUTH_TOKEN
 
       - name: Start noVNC & ngrok Tunnel
         run: |
           # Start websockify (bridges browser websockets to VNC on port 5900)
-          nohup ~/.local/bin/websockify --web=./noVNC 6080 localhost:5901 \
-            > websockify.log 2>&1 &
+          nohup python3 -m websockify --web=./noVNC 6080 localhost:5900 > websockify.log 2>&1 &
           sleep 3
 
           # Verify websockify is running
-          if ! ss -tln | grep -q ':6080 '; then
+          if ! ss -tln | grep -q ":6080"; then
             echo "❌ websockify failed to start!"
             cat websockify.log
             exit 1
@@ -94,22 +90,23 @@ jobs:
 
           # Wait for ngrok to start and grab the URL from its local API
           echo "Waiting for ngrok tunnel..."
-          tunnel_url=""
+          TUNNEL_URL=""
           for i in $(seq 1 20); do
             sleep 2
-            tunnel_url=$(curl -s http://localhost:4040/api/tunnels 2>/dev/null | python3 -c "import sys, json; d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'])" 2>/dev/null || true)
-            if [ -n "$tunnel_url" ]; then
+            RESPONSE=$(curl -s http://localhost:4040/api/tunnels || true)
+            TUNNEL_URL=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'])" 2>/dev/null || true)
+            if [ -n "$TUNNEL_URL" ]; then
               break
             fi
             echo "  Attempt $i/20 - ngrok not ready yet..."
           done
 
-          if [ -z "$tunnel_url" ]; then
+          if [ -z "$TUNNEL_URL" ]; then
             echo "❌ Failed to start ngrok! Here are the logs:"
             echo "---- STDOUT ----"
-            [ -f ngrok.log ] && cat ngrok.log
+            cat ngrok.log 2>/dev/null || true
             echo "---- STDERR ----"
-            [ -f ngrok.err ] && cat ngrok.err
+            cat ngrok.err 2>/dev/null || true
             exit 1
           fi
 
@@ -118,10 +115,10 @@ jobs:
           echo "✅ READY TO CONNECT!"
           echo ""
           echo "🌐 Open this URL in your browser:"
-          echo "   $tunnel_url"
+          echo "   $TUNNEL_URL"
           echo ""
-          echo "   That's it! You'll see the Linux Cinnamon desktop right"
-          echo "   in your browser. No extra software needed."
+          echo "   That's it! You'll see the Linux (MATE) desktop right in"
+          echo "   your browser. No extra software needed."
           echo ""
           echo "   VNC Password (if prompted): tester123"
           echo "======================================================="
