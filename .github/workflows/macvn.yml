@@ -14,7 +14,7 @@ on:
 
 jobs:
   remote-desktop:
-    runs-on: macos-latest
+    runs-on: macos-13
     timeout-minutes: ${{ fromJSON(github.event.inputs.session_timeout) }}
 
     steps:
@@ -25,26 +25,23 @@ jobs:
           echo "👤  $(whoami)"
           echo "📂  $(pwd)"
 
-      - name: Wake display & prevent sleep
+      - name: Prevent sleep & wake display
         run: |
-          # Prevent the system and display from sleeping
           sudo pmset -a displaysleep 0 sleep 0 disksleep 0
-
-          # Disable screensaver
           defaults write com.apple.screensaver idleTime 0
           defaults write com.apple.screensaver askForPassword 0
-
-          # Start caffeinate to keep system awake for the entire session
           caffeinate -disu &
-          echo $! > /tmp/caffeinate.pid
 
-          # Wake the display by simulating user activity
-          caffeinate -u -t 5 &
+      - name: Configure VNC to use console session
+        run: |
+          # CRITICAL: Force VNC to show the CONSOLE session, not a blank virtual one
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
 
-          # Disable screen lock
-          sysadminctl -screenLock off 2>/dev/null || true
+          # Disable the "curtain" which blacks out the screen for remote sessions
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement dontCurtainDuringObservation -bool true
 
-          echo "✅ Display awake, sleep disabled"
+          # Auto-login the runner user at console
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$(whoami)"
 
       - name: Enable VNC (Screen Sharing)
         run: |
@@ -56,36 +53,81 @@ jobs:
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw "${{ github.event.inputs.vnc_password }}" \
             -restart -agent -privs -all
+
+          # Restart the agent again after the defaults were set
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent
+          sleep 3
           echo "✅ VNC server enabled on port 5900"
 
-      - name: Force desktop session
+      - name: Force desktop to render
         run: |
-          # Simulate mouse movement to trigger desktop rendering
-          osascript -e 'tell application "Finder" to activate'
-          sleep 2
-          osascript -e 'tell application "System Events" to key code 53'
-          sleep 1
+          # Wake display
+          caffeinate -u -t 5
 
-          # Open a Finder window so there's something visible
+          # Activate Finder to force the desktop to draw
+          osascript -e 'tell application "Finder" to activate' || true
+          sleep 2
+
+          # Open a Finder window
           osascript -e 'tell application "Finder"
             make new Finder window
-            set bounds of front Finder window to {100, 100, 800, 600}
-          end tell'
+            set bounds of front Finder window to {100, 100, 900, 600}
+          end tell' || true
+          sleep 1
 
-          # Verify WindowServer is running
-          if pgrep -x WindowServer > /dev/null; then
-            echo "✅ WindowServer is running"
+          # Open TextEdit with a welcome message
+          osascript -e '
+            tell application "TextEdit"
+              activate
+              make new document
+              set text of front document to "🎉 Welcome to your GitHub Actions macOS runner!"
+            end tell
+          ' || true
+          sleep 1
+
+      - name: Diagnostics
+        run: |
+          echo "--- WindowServer ---"
+          pgrep -x WindowServer && echo "✅ Running" || echo "❌ NOT running"
+
+          echo ""
+          echo "--- Display info ---"
+          system_profiler SPDisplaysDataType 2>/dev/null | head -30 || true
+
+          echo ""
+          echo "--- Screenshot test ---"
+          screencapture -x /tmp/screen_test.png 2>/dev/null
+          if [ -f /tmp/screen_test.png ]; then
+            SIZE=$(stat -f%z /tmp/screen_test.png 2>/dev/null)
+            echo "Screenshot captured: ${SIZE} bytes"
+            if [ "$SIZE" -gt 5000 ]; then
+              echo "✅ Desktop appears to be rendering content"
+            else
+              echo "⚠️ Screenshot is very small — desktop might be blank"
+            fi
           else
-            echo "⚠️ WindowServer not found"
+            echo "❌ Screenshot failed"
           fi
 
-          # Log display info
-          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
-          echo "✅ Desktop session forced active"
+          echo ""
+          echo "--- VNC port check ---"
+          lsof -i :5900 || echo "⚠️ Nothing listening on 5900"
+
+          echo ""
+          echo "--- CGSession info ---"
+          python3 -c "
+          import Quartz
+          d = Quartz.CGSessionCopyCurrentDictionary()
+          if d:
+              for k in d:
+                  print(f'  {k}: {d[k]}')
+          else:
+              print('  No session dictionary available')
+          " 2>/dev/null || echo "  Could not read CGSession"
 
       - name: Install bore tunnel
         run: |
-          # Download bore (free, no account needed, no credit card)
           BORE_URL=$(curl -s https://api.github.com/repos/ekzhang/bore/releases/latest \
             | python3 -c "
           import sys, json
@@ -104,17 +146,15 @@ jobs:
 
       - name: Start VNC tunnel
         run: |
-          # Start bore tunnel in background, capture output
           bore local 5900 --to bore.pub > /tmp/bore.log 2>&1 &
           BORE_PID=$!
           sleep 5
 
-          # Parse the assigned port from bore output
           cat /tmp/bore.log
           BORE_PORT=$(grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log | head -1 | cut -d: -f2)
 
           if [ -z "$BORE_PORT" ]; then
-            echo "❌ Failed to get bore tunnel port. Log output:"
+            echo "❌ Failed to get bore tunnel port:"
             cat /tmp/bore.log
             exit 1
           fi
@@ -130,28 +170,23 @@ jobs:
           echo ""
           echo "  Password: (the one you set in workflow input)"
           echo ""
-          echo "  Recommended VNC clients:"
-          echo "    • macOS:   built-in Screen Sharing app"
-          echo "               (Finder → Go → Connect to Server)"
-          echo "               vnc://bore.pub:${BORE_PORT}"
-          echo "    • Windows: RealVNC Viewer, TightVNC"
-          echo "    • Linux:   Remmina, TigerVNC"
-          echo "    • iOS/Android: RealVNC Viewer"
+          echo "  VNC clients:"
+          echo "    • macOS:   vnc://bore.pub:${BORE_PORT}"
+          echo "    • Windows: RealVNC Viewer / TightVNC"
+          echo "    • Linux:   vncviewer bore.pub:${BORE_PORT}"
           echo ""
           echo "  Session timeout: ${{ github.event.inputs.session_timeout }} min"
           echo "============================================"
 
       - name: Keep alive until timeout
         run: |
-          echo "⏳ Session active. Auto-terminates in ${{ github.event.inputs.session_timeout }} min."
-          echo "   Cancel the workflow manually when you're done."
-          echo ""
+          echo "⏳ Session active (${{ github.event.inputs.session_timeout }} min)."
+          echo "   Cancel the workflow when done."
           TIMEOUT=$(( ${{ github.event.inputs.session_timeout }} * 60 ))
           ELAPSED=0
-          INTERVAL=60
           while [ $ELAPSED -lt $TIMEOUT ]; do
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
+            sleep 60
+            ELAPSED=$((ELAPSED + 60))
             REMAINING=$(( (TIMEOUT - ELAPSED) / 60 ))
             echo "⏱️  ${REMAINING} min remaining..."
           done
