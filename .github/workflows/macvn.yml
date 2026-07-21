@@ -25,6 +25,27 @@ jobs:
           echo "👤  $(whoami)"
           echo "📂  $(pwd)"
 
+      - name: Wake display & prevent sleep
+        run: |
+          # Prevent the system and display from sleeping
+          sudo pmset -a displaysleep 0 sleep 0 disksleep 0
+
+          # Disable screensaver
+          defaults write com.apple.screensaver idleTime 0
+          defaults write com.apple.screensaver askForPassword 0
+
+          # Start caffeinate to keep system awake for the entire session
+          caffeinate -disu &
+          echo $! > /tmp/caffeinate.pid
+
+          # Wake the display by simulating user activity
+          caffeinate -u -t 5 &
+
+          # Disable screen lock
+          sysadminctl -screenLock off 2>/dev/null || true
+
+          echo "✅ Display awake, sleep disabled"
+
       - name: Enable VNC (Screen Sharing)
         run: |
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
@@ -36,6 +57,31 @@ jobs:
             -clientopts -setvncpw -vncpw "${{ github.event.inputs.vnc_password }}" \
             -restart -agent -privs -all
           echo "✅ VNC server enabled on port 5900"
+
+      - name: Force desktop session
+        run: |
+          # Simulate mouse movement to trigger desktop rendering
+          osascript -e 'tell application "Finder" to activate'
+          sleep 2
+          osascript -e 'tell application "System Events" to key code 53'
+          sleep 1
+
+          # Open a Finder window so there's something visible
+          osascript -e 'tell application "Finder"
+            make new Finder window
+            set bounds of front Finder window to {100, 100, 800, 600}
+          end tell'
+
+          # Verify WindowServer is running
+          if pgrep -x WindowServer > /dev/null; then
+            echo "✅ WindowServer is running"
+          else
+            echo "⚠️ WindowServer not found"
+          fi
+
+          # Log display info
+          system_profiler SPDisplaysDataType 2>/dev/null | head -20 || true
+          echo "✅ Desktop session forced active"
 
       - name: Install bore tunnel
         run: |
