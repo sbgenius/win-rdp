@@ -9,16 +9,15 @@ jobs:
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
     steps:
-      - name: Install Cinnamon Desktop, VNC server, and Xvfb
+      - name: Install XFCE Desktop, VNC server, and Xvfb
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cinnamon-desktop-environment \
+            xfce4 \
+            xfce4-goodies \
             xvfb \
             x11vnc \
             dbus-x11 \
-            mesa-utils \
-            libgl1-mesa-dri \
             python3-pip \
             unzip \
             wget
@@ -30,14 +29,12 @@ jobs:
           echo "✅ Xvfb started on display :1"
           echo "DISPLAY=:1" >> $GITHUB_ENV
 
-      - name: Start Cinnamon Session
+      - name: Start XFCE Session
         run: |
           export DISPLAY=:1
-          export LIBGL_ALWAYS_SOFTWARE=1
-          export CLUTTER_BACKEND=x11
-          nohup dbus-launch --exit-with-session cinnamon-session > cinnamon-session.log 2>&1 &
-          sleep 10
-          echo "✅ Cinnamon session started"
+          nohup dbus-launch --exit-with-session startxfce4 > xfce-session.log 2>&1 &
+          sleep 5
+          echo "✅ XFCE session started"
 
       - name: Start x11vnc Server
         run: |
@@ -120,7 +117,7 @@ jobs:
           echo "🌐 Open this URL in your browser:"
           echo "   $TUNNEL_URL"
           echo ""
-          echo "   That's it! You'll see the Linux (Cinnamon) desktop right in"
+          echo "   That's it! You'll see the Linux (XFCE) desktop right in"
           echo "   your browser. No extra software needed."
           echo ""
           echo "   VNC Password (if prompted): tester123"
