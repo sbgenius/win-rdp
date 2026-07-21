@@ -44,15 +44,22 @@ jobs:
           export GALLIUM_DRIVER=llvmpipe
           export CLUTTER_BACKEND=x11
 
+          # Tell Cinnamon what kind of session this is so the WM warning goes away
+          # and nemo-desktop correctly detects it should draw desktop icons
+          export XDG_SESSION_TYPE=x11
+          export XDG_CURRENT_DESKTOP=X-Cinnamon
+          export DESKTOP_SESSION=cinnamon
+
           # Quick sanity check that software GL actually works before starting Cinnamon
           glxinfo -B || echo "⚠️ glxinfo check failed, continuing anyway..."
 
           nohup cinnamon-session > cinnamon-session.log 2>&1 &
           sleep 12
 
-          # Verify the window manager (muffin) actually came up
-          if ! pgrep -x "muffin" > /dev/null; then
-            echo "❌ Muffin (Cinnamon's window manager) did not start! Dumping logs:"
+          # Muffin runs embedded inside the main "cinnamon" process, not as its own
+          # binary, so check for that instead
+          if ! pgrep -x "cinnamon" > /dev/null; then
+            echo "❌ Cinnamon shell did not start! Dumping logs:"
             cat cinnamon-session.log
             exit 1
           fi
