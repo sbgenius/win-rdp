@@ -9,12 +9,11 @@ jobs:
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
     steps:
-      - name: Install MATE Desktop, VNC server, and Xvfb
+      - name: Install Cinnamon Desktop, VNC server, and Xvfb
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            mate-desktop-environment \
-            mate-desktop-environment-extras \
+            cinnamon-desktop-environment \
             xvfb \
             x11vnc \
             dbus-x11 \
@@ -29,12 +28,12 @@ jobs:
           echo "✅ Xvfb started on display :1"
           echo "DISPLAY=:1" >> $GITHUB_ENV
 
-      - name: Start MATE Session
+      - name: Start Cinnamon Session
         run: |
           export DISPLAY=:1
-          nohup mate-session > mate-session.log 2>&1 &
+          nohup cinnamon-session > cinnamon-session.log 2>&1 &
           sleep 5
-          echo "✅ MATE session started"
+          echo "✅ Cinnamon session started"
 
       - name: Start x11vnc Server
         run: |
@@ -117,7 +116,7 @@ jobs:
           echo "🌐 Open this URL in your browser:"
           echo "   $TUNNEL_URL"
           echo ""
-          echo "   That's it! You'll see the Linux (MATE) desktop right in"
+          echo "   That's it! You'll see the Linux (Cinnamon) desktop right in"
           echo "   your browser. No extra software needed."
           echo ""
           echo "   VNC Password (if prompted): tester123"
