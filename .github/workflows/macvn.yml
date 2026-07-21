@@ -1,33 +1,22 @@
-name: macOS Screenshot
+name: SSH Debug - macOS Runner
+
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
+    inputs:
+      duration:
+        description: 'Timeout duration in minutes for the SSH session'
+        required: false
+        default: '30'
 
 jobs:
-  screenshot:
-    runs-on: macos-14
+  ssh-debug:
+    runs-on: macos-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Take screenshot
-        run: |
-          # -x = no shutter sound. Saves straight to the repo root, which is
-          # the working directory actions/checkout puts you in.
-          screencapture -x screenshot.png
-
-          if [ ! -s screenshot.png ]; then
-            echo "❌ screenshot.png is empty or missing - screencapture may be TCC-blocked on this runner"
-            exit 1
-          fi
-          echo "✅ Screenshot captured: $(ls -la screenshot.png)"
-
-      - name: Commit and push screenshot
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add screenshot.png
-          git diff --cached --quiet && echo "No changes to commit" || git commit -m "Add screenshot from macOS runner"
-          git push
+      - name: Setup SSH session via tmate
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+        timeout-minutes: ${{ fromJSON(github.event.inputs.duration || '30') }}
