@@ -17,6 +17,8 @@ jobs:
             xvfb \
             x11vnc \
             dbus-x11 \
+            mesa-utils \
+            libgl1-mesa-dri \
             python3-pip \
             unzip \
             wget
@@ -31,8 +33,10 @@ jobs:
       - name: Start Cinnamon Session
         run: |
           export DISPLAY=:1
-          nohup cinnamon-session > cinnamon-session.log 2>&1 &
-          sleep 5
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export CLUTTER_BACKEND=x11
+          nohup dbus-launch --exit-with-session cinnamon-session > cinnamon-session.log 2>&1 &
+          sleep 10
           echo "✅ Cinnamon session started"
 
       - name: Start x11vnc Server
