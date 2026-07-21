@@ -22,6 +22,29 @@ jobs:
           sudo systemctl disable lightdm.service || true
           sudo systemctl stop lightdm.service || true
 
+      - name: Install Linux Mint look-and-feel (theme, icons, wallpaper)
+        run: |
+          # Pull in Linux Mint's own artwork/theme packages from their APT repo.
+          # NOTE: "wilma" is the Mint 22 codename (matches Ubuntu 24.04 "noble",
+          # which is what ubuntu-latest currently maps to). If GitHub bumps
+          # ubuntu-latest to a newer Ubuntu release, update this codename to
+          # match the corresponding Linux Mint release - see
+          # https://www.linuxmint.com/download_all.php for the current mapping.
+          curl -fsSL https://packages.linuxmint.com/packages.linuxmint.com.gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/linuxmint-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/linuxmint-archive-keyring.gpg] http://packages.linuxmint.com wilma main upstream import backport" \
+            | sudo tee /etc/apt/sources.list.d/linuxmint.list
+          sudo apt-get update
+
+          # Only pull the pure artwork/theme packages - not a full Mint base
+          # system - so this can't drag in conflicting Mint core packages.
+          sudo apt-get install -y mint-themes mint-y-icons mint-x-icons mint-backgrounds-wilma
+
+          # Repo has served its purpose; remove it so nothing else on the
+          # runner gets pulled from Mint by accident.
+          sudo rm -f /etc/apt/sources.list.d/linuxmint.list
+          sudo apt-get update
+
       - name: Configure VNC (password, resolution, Cinnamon session)
         run: |
           mkdir -p ~/.vnc
@@ -30,14 +53,41 @@ jobs:
           echo "tester123" | vncpasswd -f > ~/.vnc/passwd
           chmod 600 ~/.vnc/passwd
 
-          # xstartup: launch a full Cinnamon session inside the VNC X server
+          # xstartup: launch a full Cinnamon session inside the VNC X server,
+          # then apply Mint-Y theming + a Mint-style single bottom panel once
+          # the session bus is up.
           cat > ~/.vnc/xstartup << 'EOF'
           #!/bin/bash
           unset SESSION_MANAGER
           unset DBUS_SESSION_BUS_ADDRESS
           export XDG_CURRENT_DESKTOP=X-Cinnamon
           export XDG_SESSION_TYPE=x11
-          exec dbus-launch --exit-with-session cinnamon-session
+
+          eval "$(dbus-launch --sh-syntax --exit-with-session)"
+          export DBUS_SESSION_BUS_ADDRESS
+
+          (
+            sleep 6
+
+            # Theme, icons, cursor - the actual Linux Mint Cinnamon defaults
+            gsettings set org.cinnamon.desktop.interface gtk-theme 'Mint-Y'
+            gsettings set org.cinnamon.desktop.wm.preferences theme 'Mint-Y'
+            gsettings set org.cinnamon.theme name 'Mint-Y-Dark'
+            gsettings set org.cinnamon.desktop.interface icon-theme 'Mint-Y'
+            gsettings set org.cinnamon.desktop.interface cursor-theme 'Mint-Y'
+
+            # Mint's wallpaper (path comes from the mint-backgrounds-wilma package)
+            bg=$(find /usr/share/backgrounds/linuxmint* -name '*.jpg' 2>/dev/null | head -n1)
+            if [ -n "$bg" ]; then
+              gsettings set org.cinnamon.desktop.background picture-uri "file://$bg"
+            fi
+
+            # Mint's layout: single panel, bottom edge, ~40px tall
+            gsettings set org.cinnamon panels-enabled "['1:0:bottom']"
+            gsettings set org.cinnamon panels-height "['1:40']"
+          ) &
+
+          exec cinnamon-session
           EOF
           chmod +x ~/.vnc/xstartup
 
