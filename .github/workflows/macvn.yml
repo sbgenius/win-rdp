@@ -1,43 +1,17 @@
-name: SSH Debug macOS Runner
+name: Debug macOS Runner
 
 on:
-  workflow_dispatch:
-
-permissions:
-  contents: write
+  workflow_dispatch:  # lets you trigger it manually from the Actions tab
 
 jobs:
-  ssh-debug:
+  debug:
     runs-on: macos-latest
-    timeout-minutes: 345
-
     steps:
-      - name: Checkout repo
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Configure git
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Setup tmate session
-        id: tmate
         uses: mxschmitt/action-tmate@v3
         with:
-          limit-access-to-actor: true
-          install-dependencies: true
-        timeout-minutes: 345
-
-      - name: Write connection info to repo
-        if: always()
-        run: |
-          echo "SSH connection command:" > SSH_CONNECT.txt
-          echo "${{ steps.tmate.outputs.connection-string || 'not available' }}" >> SSH_CONNECT.txt
-          echo "Generated: $(date -u)" >> SSH_CONNECT.txt
-          echo "Run: ${{ github.run_id }}" >> SSH_CONNECT.txt
-          git add SSH_CONNECT.txt
-          git commit -m "Update SSH connection info [skip ci]" || echo "Nothing to commit"
-          git pull --rebase
-          git push
+          limit-access-to-actor: true   # only your GitHub account can connect
+        timeout-minutes: 30             # session auto-closes after 30 min
