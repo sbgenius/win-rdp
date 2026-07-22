@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # needed to push the connection file
+  contents: write
 
 jobs:
   ssh-debug:
     runs-on: macos-latest
-    timeout-minutes: 345  # 5h45m
+    timeout-minutes: 345
 
     steps:
       - name: Checkout repo
@@ -17,62 +17,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install tmate
-        run: brew install tmate
-
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Restrict SSH access to triggering actor
-        run: |
-          mkdir -p ~/.tmate
-          curl -sL "https://github.com/${{ github.actor }}.keys" -o ~/.tmate/authorized_keys
-
-          echo "Fetched keys for actor: ${{ github.actor }}"
-          echo "Key count: $(wc -l < ~/.tmate/authorized_keys)"
-          cat ~/.tmate/authorized_keys
-
-          if [ ! -s ~/.tmate/authorized_keys ]; then
-            echo "ERROR: No public keys found for ${{ github.actor }}."
-            echo "Add one at https://github.com/settings/keys (must be an Authentication key, not just a signing key)."
-            exit 1
-          fi
-
-          cat > ~/.tmate.conf <<EOF
-          set -g tmate-authorized-keys "$(cat ~/.tmate/authorized_keys)"
-          EOF
-
-      - name: Start tmate session
-        run: |
-          tmate -f ~/.tmate.conf -S /tmp/tmate.sock new-session -d
-          tmate -S /tmp/tmate.sock wait tmate-ready
+      - name: Setup tmate session
+        id: tmate
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          install-dependencies: true
+        timeout-minutes: 345
 
       - name: Write connection info to repo
+        if: always()
         run: |
-          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
-          {
-            echo "SSH connection command (overwritten each run):"
-            echo "$SSH_CMD"
-            echo "Generated: $(date -u)"
-            echo "Run: ${{ github.run_id }}"
-          } > SSH_CONNECT.txt
-
-          echo "Connection command: $SSH_CMD"
-
+          echo "SSH connection command:" > SSH_CONNECT.txt
+          echo "${{ steps.tmate.outputs.connection-string || 'not available' }}" >> SSH_CONNECT.txt
+          echo "Generated: $(date -u)" >> SSH_CONNECT.txt
+          echo "Run: ${{ github.run_id }}" >> SSH_CONNECT.txt
           git add SSH_CONNECT.txt
           git commit -m "Update SSH connection info [skip ci]" || echo "Nothing to commit"
           git pull --rebase
           git push
-
-      - name: Keep session alive
-        run: |
-          END=$((SECONDS + 20700))  # 5h45m in seconds
-          while [ $SECONDS -lt $END ]; do
-            if ! tmate -S /tmp/tmate.sock has-session 2>/dev/null; then
-              echo "tmate session ended, exiting early"
-              break
-            fi
-            sleep 30
-          done
