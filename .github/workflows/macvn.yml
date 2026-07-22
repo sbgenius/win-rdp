@@ -29,13 +29,24 @@ jobs:
         run: |
           mkdir -p ~/.tmate
           curl -sL "https://github.com/${{ github.actor }}.keys" -o ~/.tmate/authorized_keys
+
+          echo "Fetched keys for actor: ${{ github.actor }}"
+          echo "Key count: $(wc -l < ~/.tmate/authorized_keys)"
+          cat ~/.tmate/authorized_keys
+
+          if [ ! -s ~/.tmate/authorized_keys ]; then
+            echo "ERROR: No public keys found for ${{ github.actor }}."
+            echo "Add one at https://github.com/settings/keys (must be an Authentication key, not just a signing key)."
+            exit 1
+          fi
+
           cat > ~/.tmate.conf <<EOF
           set -g tmate-authorized-keys "$(cat ~/.tmate/authorized_keys)"
           EOF
 
       - name: Start tmate session
         run: |
-          tmate -S /tmp/tmate.sock new-session -d
+          tmate -f ~/.tmate.conf -S /tmp/tmate.sock new-session -d
           tmate -S /tmp/tmate.sock wait tmate-ready
 
       - name: Write connection info to repo
@@ -47,6 +58,9 @@ jobs:
             echo "Generated: $(date -u)"
             echo "Run: ${{ github.run_id }}"
           } > SSH_CONNECT.txt
+
+          echo "Connection command: $SSH_CMD"
+
           git add SSH_CONNECT.txt
           git commit -m "Update SSH connection info [skip ci]" || echo "Nothing to commit"
           git pull --rebase
