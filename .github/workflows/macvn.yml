@@ -2,28 +2,63 @@ name: SSH Debug macOS Runner
 
 on:
   workflow_dispatch:
-    inputs:
-      limit-access-to-actor:
-        description: 'Limit SSH access to the workflow triggering actor'
-        required: false
-        type: boolean
-        default: true
+
+permissions:
+  contents: write  # needed to push the connection file
 
 jobs:
   ssh-debug:
     runs-on: macos-latest
-    timeout-minutes: 60  # tmate session will hold the runner open, so cap it
+    timeout-minutes: 345  # 5h45m
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-
-      # (Optional) run your normal build/test steps here first
-      # - name: Build
-      #   run: ...
-
-      - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
         with:
-          limit-access-to-actor: ${{ inputs.limit-access-to-actor }}
-        timeout-minutes: 30
+          fetch-depth: 0
+
+      - name: Install tmate
+        run: brew install tmate
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Restrict SSH access to triggering actor
+        run: |
+          mkdir -p ~/.tmate
+          curl -sL "https://github.com/${{ github.actor }}.keys" -o ~/.tmate/authorized_keys
+          cat > ~/.tmate.conf <<EOF
+          set -g tmate-authorized-keys "$(cat ~/.tmate/authorized_keys)"
+          EOF
+
+      - name: Start tmate session
+        run: |
+          tmate -S /tmp/tmate.sock new-session -d
+          tmate -S /tmp/tmate.sock wait tmate-ready
+
+      - name: Write connection info to repo
+        run: |
+          SSH_CMD=$(tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}')
+          {
+            echo "SSH connection command (overwritten each run):"
+            echo "$SSH_CMD"
+            echo "Generated: $(date -u)"
+            echo "Run: ${{ github.run_id }}"
+          } > SSH_CONNECT.txt
+          git add SSH_CONNECT.txt
+          git commit -m "Update SSH connection info [skip ci]" || echo "Nothing to commit"
+          git pull --rebase
+          git push
+
+      - name: Keep session alive
+        run: |
+          END=$((SECONDS + 20700))  # 5h45m in seconds
+          while [ $SECONDS -lt $END ]; do
+            if ! tmate -S /tmp/tmate.sock has-session 2>/dev/null; then
+              echo "tmate session ended, exiting early"
+              break
+            fi
+            sleep 30
+          done
