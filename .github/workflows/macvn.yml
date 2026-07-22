@@ -1,193 +1,29 @@
-name: macOS Remote Desktop (VNC)
+name: SSH Debug macOS Runner
 
 on:
   workflow_dispatch:
     inputs:
-      vnc_password:
-        description: "VNC password (max 8 chars)"
-        required: true
-        default: "remoteme"
-      session_timeout:
-        description: "Max session time in minutes"
-        required: true
-        default: "30"
+      limit-access-to-actor:
+        description: 'Limit SSH access to the workflow triggering actor'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
-  remote-desktop:
-    runs-on: macos-13
-    timeout-minutes: ${{ fromJSON(github.event.inputs.session_timeout) }}
+  ssh-debug:
+    runs-on: macos-latest
+    timeout-minutes: 60  # tmate session will hold the runner open, so cap it
 
     steps:
-      - name: System Info
-        run: |
-          echo "🖥️  $(sw_vers -productName) $(sw_vers -productVersion)"
-          echo "🏗️  $(uname -m)"
-          echo "👤  $(whoami)"
-          echo "📂  $(pwd)"
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - name: Prevent sleep & wake display
-        run: |
-          sudo pmset -a displaysleep 0 sleep 0 disksleep 0
-          defaults write com.apple.screensaver idleTime 0
-          defaults write com.apple.screensaver askForPassword 0
-          caffeinate -disu &
+      # (Optional) run your normal build/test steps here first
+      # - name: Build
+      #   run: ...
 
-      - name: Configure VNC to use console session
-        run: |
-          # CRITICAL: Force VNC to show the CONSOLE session, not a blank virtual one
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
-
-          # Disable the "curtain" which blacks out the screen for remote sessions
-          sudo defaults write /Library/Preferences/com.apple.RemoteManagement dontCurtainDuringObservation -bool true
-
-          # Auto-login the runner user at console
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$(whoami)"
-
-      - name: Enable VNC (Screen Sharing)
-        run: |
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate \
-            -configure -access -on \
-            -configure -allowAccessFor -allUsers \
-            -configure -restart -agent \
-            -clientopts -setvnclegacy -vnclegacy yes \
-            -clientopts -setvncpw -vncpw "${{ github.event.inputs.vnc_password }}" \
-            -restart -agent -privs -all
-
-          # Restart the agent again after the defaults were set
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -restart -agent
-          sleep 3
-          echo "✅ VNC server enabled on port 5900"
-
-      - name: Force desktop to render
-        run: |
-          # Wake display
-          caffeinate -u -t 5
-
-          # Activate Finder to force the desktop to draw
-          osascript -e 'tell application "Finder" to activate' || true
-          sleep 2
-
-          # Open a Finder window
-          osascript -e 'tell application "Finder"
-            make new Finder window
-            set bounds of front Finder window to {100, 100, 900, 600}
-          end tell' || true
-          sleep 1
-
-          # Open TextEdit with a welcome message
-          osascript -e '
-            tell application "TextEdit"
-              activate
-              make new document
-              set text of front document to "🎉 Welcome to your GitHub Actions macOS runner!"
-            end tell
-          ' || true
-          sleep 1
-
-      - name: Diagnostics
-        run: |
-          echo "--- WindowServer ---"
-          pgrep -x WindowServer && echo "✅ Running" || echo "❌ NOT running"
-
-          echo ""
-          echo "--- Display info ---"
-          system_profiler SPDisplaysDataType 2>/dev/null | head -30 || true
-
-          echo ""
-          echo "--- Screenshot test ---"
-          screencapture -x /tmp/screen_test.png 2>/dev/null
-          if [ -f /tmp/screen_test.png ]; then
-            SIZE=$(stat -f%z /tmp/screen_test.png 2>/dev/null)
-            echo "Screenshot captured: ${SIZE} bytes"
-            if [ "$SIZE" -gt 5000 ]; then
-              echo "✅ Desktop appears to be rendering content"
-            else
-              echo "⚠️ Screenshot is very small — desktop might be blank"
-            fi
-          else
-            echo "❌ Screenshot failed"
-          fi
-
-          echo ""
-          echo "--- VNC port check ---"
-          lsof -i :5900 || echo "⚠️ Nothing listening on 5900"
-
-          echo ""
-          echo "--- CGSession info ---"
-          python3 -c "
-          import Quartz
-          d = Quartz.CGSessionCopyCurrentDictionary()
-          if d:
-              for k in d:
-                  print(f'  {k}: {d[k]}')
-          else:
-              print('  No session dictionary available')
-          " 2>/dev/null || echo "  Could not read CGSession"
-
-      - name: Install bore tunnel
-        run: |
-          BORE_URL=$(curl -s https://api.github.com/repos/ekzhang/bore/releases/latest \
-            | python3 -c "
-          import sys, json
-          assets = json.load(sys.stdin)['assets']
-          for a in assets:
-              name = a['name']
-              if 'apple-darwin' in name and ('aarch64' in name or 'x86_64' in name):
-                  print(a['browser_download_url'])
-                  break
-          ")
-          echo "Downloading: $BORE_URL"
-          curl -sL "$BORE_URL" | tar xz
-          chmod +x bore
-          sudo mv bore /usr/local/bin/bore
-          bore --version
-
-      - name: Start VNC tunnel
-        run: |
-          bore local 5900 --to bore.pub > /tmp/bore.log 2>&1 &
-          BORE_PID=$!
-          sleep 5
-
-          cat /tmp/bore.log
-          BORE_PORT=$(grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log | head -1 | cut -d: -f2)
-
-          if [ -z "$BORE_PORT" ]; then
-            echo "❌ Failed to get bore tunnel port:"
-            cat /tmp/bore.log
-            exit 1
-          fi
-
-          echo ""
-          echo "============================================"
-          echo "🚀 VNC REMOTE DESKTOP READY"
-          echo "============================================"
-          echo ""
-          echo "  Connect with any VNC client to:"
-          echo ""
-          echo "    bore.pub:${BORE_PORT}"
-          echo ""
-          echo "  Password: (the one you set in workflow input)"
-          echo ""
-          echo "  VNC clients:"
-          echo "    • macOS:   vnc://bore.pub:${BORE_PORT}"
-          echo "    • Windows: RealVNC Viewer / TightVNC"
-          echo "    • Linux:   vncviewer bore.pub:${BORE_PORT}"
-          echo ""
-          echo "  Session timeout: ${{ github.event.inputs.session_timeout }} min"
-          echo "============================================"
-
-      - name: Keep alive until timeout
-        run: |
-          echo "⏳ Session active (${{ github.event.inputs.session_timeout }} min)."
-          echo "   Cancel the workflow when done."
-          TIMEOUT=$(( ${{ github.event.inputs.session_timeout }} * 60 ))
-          ELAPSED=0
-          while [ $ELAPSED -lt $TIMEOUT ]; do
-            sleep 60
-            ELAPSED=$((ELAPSED + 60))
-            REMAINING=$(( (TIMEOUT - ELAPSED) / 60 ))
-            echo "⏱️  ${REMAINING} min remaining..."
-          done
-          echo "🛑 Session timed out."
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: ${{ inputs.limit-access-to-actor }}
+        timeout-minutes: 30
