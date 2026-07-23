@@ -1,157 +1,395 @@
-name: Linux RDP Testing
+name: macOS Remote Desktop (VNC)
+
 on:
-  workflow_dispatch: # Allows you to trigger this manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      vnc_password:
+        description: "VNC password (max 8 chars)"
+        required: true
+        default: "remoteme"
+      session_timeout:
+        description: "Max session time in minutes"
+        required: true
+        default: "30"
+
+permissions:
+  contents: write
 
 jobs:
-  rdp-test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360 # Max 6 hours
-    env:
-      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+  remote-desktop:
+    runs-on: macos-latest
+    timeout-minutes: ${{ fromJSON(github.event.inputs.session_timeout) }}
+
     steps:
-      - name: Install Cinnamon Desktop, Mesa Software Rendering, VNC server, and Xvfb
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: "[DIAG] System info"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cinnamon-desktop-environment \
-            mesa-utils \
-            libgl1-mesa-dri \
-            libglx-mesa0 \
-            libegl-mesa0 \
-            fonts-noto \
-            xvfb \
-            x11vnc \
-            dbus-x11 \
-            python3-pip \
-            unzip \
-            wget
+          echo "=== OS ==="
+          sw_vers
+          echo ""
+          echo "=== Architecture ==="
+          uname -a
+          echo ""
+          echo "=== User ==="
+          whoami
+          id
+          echo ""
+          echo "=== SIP Status ==="
+          csrutil status 2>&1 || true
+          echo ""
+          echo "=== Current GUI session user ==="
+          stat -f '%Su' /dev/console 2>/dev/null || echo "N/A"
+          echo ""
+          echo "=== Login window settings ==="
+          sudo defaults read /Library/Preferences/com.apple.loginwindow 2>/dev/null || echo "N/A"
 
-      - name: Start Virtual Display (1920x1080)
+      - name: "[DIAG] Display & WindowServer (BEFORE)"
         run: |
-          Xvfb :1 -screen 0 1920x1080x24 +extension GLX +extension RENDER -noreset &
-          sleep 3
-          echo "✅ Xvfb started on display :1"
-          echo "DISPLAY=:1" >> $GITHUB_ENV
-
-      - name: Start Cinnamon Session (Software Rendering)
-        run: |
-          export DISPLAY=:1
-          eval $(dbus-launch --sh-syntax --exit-with-session)
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> $GITHUB_ENV
-
-          # Force Mesa to use its software rasterizer (llvmpipe) since there's no GPU
-          export LIBGL_ALWAYS_SOFTWARE=1
-          export GALLIUM_DRIVER=llvmpipe
-          export CLUTTER_BACKEND=x11
-
-          # Tell Cinnamon what kind of session this is so the WM warning goes away
-          # and nemo-desktop correctly detects it should draw desktop icons
-          export XDG_SESSION_TYPE=x11
-          export XDG_CURRENT_DESKTOP=X-Cinnamon
-          export DESKTOP_SESSION=cinnamon
-
-          # Quick sanity check that software GL actually works before starting Cinnamon
-          glxinfo -B || echo "⚠️ glxinfo check failed, continuing anyway..."
-
-          nohup cinnamon-session > cinnamon-session.log 2>&1 &
-          sleep 12
-
-          # Muffin runs embedded inside the main "cinnamon" process, not as its own
-          # binary, so check for that instead
-          if ! pgrep -x "cinnamon" > /dev/null; then
-            echo "❌ Cinnamon shell did not start! Dumping logs:"
-            cat cinnamon-session.log
-            exit 1
+          echo "=== WindowServer process ==="
+          ps aux | grep -i windowserver | grep -v grep || echo "NOT RUNNING"
+          echo ""
+          echo "=== Display info ==="
+          system_profiler SPDisplaysDataType 2>/dev/null || echo "N/A"
+          echo ""
+          echo "=== CGSession ==="
+          python3 -c "
+          try:
+              import Quartz
+              d = Quartz.CGSessionCopyCurrentDictionary()
+              if d:
+                  for k in sorted(d):
+                      print(f'  {k} = {d[k]}')
+              else:
+                  print('  CGSessionCopyCurrentDictionary returned None')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+          echo ""
+          echo "=== Quartz display list ==="
+          python3 -c "
+          try:
+              import Quartz
+              err, ids, cnt = Quartz.CGGetActiveDisplayList(10, None, None)
+              print(f'  Error code: {err}')
+              print(f'  Active display count: {cnt}')
+              if ids:
+                  for d in ids:
+                      b = Quartz.CGDisplayBounds(d)
+                      print(f'  Display {d}: {int(b.size.width)}x{int(b.size.height)} at ({int(b.origin.x)},{int(b.origin.y)})')
+                      print(f'    Online: {Quartz.CGDisplayIsOnline(d)}')
+                      print(f'    Active: {Quartz.CGDisplayIsActive(d)}')
+                      print(f'    Asleep: {Quartz.CGDisplayIsAsleep(d)}')
+                      print(f'    Main: {Quartz.CGDisplayIsMain(d)}')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+          echo ""
+          echo "=== Power management settings ==="
+          pmset -g 2>/dev/null || true
+          echo ""
+          echo "=== Screen capture test (BEFORE VNC) ==="
+          screencapture -x /tmp/screen_before.png 2>&1 || echo "screencapture failed"
+          if [ -f /tmp/screen_before.png ]; then
+            ls -la /tmp/screen_before.png
+            file /tmp/screen_before.png
           fi
-          echo "✅ Cinnamon session started with software rendering"
 
-      - name: Start x11vnc Server
+      - name: Prevent sleep
         run: |
-          export DISPLAY=:1
-          x11vnc -display :1 -forever -shared -rfbport 5900 -passwd tester123 -bg -o x11vnc.log
+          sudo pmset -a displaysleep 0 sleep 0 disksleep 0 hibernatemode 0
+          defaults write com.apple.screensaver idleTime 0
+          defaults write com.apple.screensaver askForPassword 0
+          caffeinate -disu &
+          caffeinate -u -t 10 &
+          echo "✅ Sleep disabled"
+
+      - name: Configure ARD/VNC preferences
+        run: |
+          echo "=== Setting VNC preferences ==="
+
+          # Force VNC to use the console (real) session
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+          echo "  VNCAlwaysStartOnConsole = true"
+
+          # Disable curtain (prevents intentional black screen)
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement dontCurtainDuringObservation -bool true
+          echo "  dontCurtainDuringObservation = true"
+
+          # Auto-login
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$(whoami)"
+          echo "  autoLoginUser = $(whoami)"
+
+          # Disable screen lock
+          sysadminctl -screenLock off 2>/dev/null || true
+
+          echo ""
+          echo "=== Verify all RemoteManagement prefs ==="
+          sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null || echo "N/A"
+
+      - name: Enable VNC (Screen Sharing)
+        run: |
+          echo "=== Kickstart ARD ==="
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -restart -agent \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw "${{ github.event.inputs.vnc_password }}" \
+            -restart -agent -privs -all 2>&1
+          echo ""
+
+          echo "=== Restart agent after pref changes ==="
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent 2>&1
+          sleep 3
+          echo ""
+
+          echo "=== Verify VNC is listening ==="
+          lsof -i :5900 2>/dev/null || echo "⚠️ Nothing on port 5900"
+          echo ""
+          netstat -an | grep 5900 || echo "⚠️ netstat shows nothing on 5900"
+
+      - name: "[DIAG] Display & WindowServer (AFTER VNC)"
+        run: |
+          echo "=== WindowServer process ==="
+          ps aux | grep -i windowserver | grep -v grep || echo "NOT RUNNING"
+          echo ""
+          echo "=== ARDAgent process ==="
+          ps aux | grep -i ARDAgent | grep -v grep || echo "NOT RUNNING"
+          echo ""
+          echo "=== screensharingd process ==="
+          ps aux | grep -i screensharing | grep -v grep || echo "NOT RUNNING"
+          echo ""
+          echo "=== All relevant processes ==="
+          ps aux | grep -iE '(vnc|ard|screensharing|windowserver|loginwindow|Finder)' | grep -v grep || true
+          echo ""
+          echo "=== Quartz display list (AFTER) ==="
+          python3 -c "
+          try:
+              import Quartz
+              err, ids, cnt = Quartz.CGGetActiveDisplayList(10, None, None)
+              print(f'  Error code: {err}')
+              print(f'  Active display count: {cnt}')
+              if ids:
+                  for d in ids:
+                      b = Quartz.CGDisplayBounds(d)
+                      print(f'  Display {d}: {int(b.size.width)}x{int(b.size.height)} at ({int(b.origin.x)},{int(b.origin.y)})')
+                      print(f'    Online: {Quartz.CGDisplayIsOnline(d)}')
+                      print(f'    Active: {Quartz.CGDisplayIsActive(d)}')
+                      print(f'    Asleep: {Quartz.CGDisplayIsAsleep(d)}')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+          echo ""
+          echo "=== CGSession (AFTER) ==="
+          python3 -c "
+          try:
+              import Quartz
+              d = Quartz.CGSessionCopyCurrentDictionary()
+              if d:
+                  for k in sorted(d):
+                      print(f'  {k} = {d[k]}')
+              else:
+                  print('  CGSessionCopyCurrentDictionary returned None')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+
+      - name: Force desktop to render
+        run: |
+          caffeinate -u -t 5
+          osascript -e 'tell application "Finder" to activate' 2>&1 || true
           sleep 2
+          osascript -e 'tell application "Finder"
+            make new Finder window
+            set bounds of front Finder window to {50, 50, 900, 600}
+          end tell' 2>&1 || true
+          sleep 1
+          osascript -e 'tell application "TextEdit"
+            activate
+            make new document
+            set text of front document to "GitHub Actions macOS Remote Desktop"
+          end tell' 2>&1 || true
+          sleep 1
+          echo "✅ Finder + TextEdit launched"
 
-          # Verify x11vnc is running
-          if ! pgrep -x "x11vnc" > /dev/null; then
-            echo "❌ x11vnc failed to start!"
-            cat x11vnc.log
-            exit 1
-          fi
-          echo "✅ x11vnc is running on port 5900"
-
-      - name: Setup Python websockify & Download noVNC
+      - name: "[DIAG] Screenshot test (AFTER desktop force)"
         run: |
-          pip3 install websockify
-
-          # Download noVNC (the browser-based VNC client)
-          wget -q "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -O novnc.zip
-          unzip -q novnc.zip
-          mv noVNC-1.5.0 noVNC
-
-          # Create a simple redirect so opening the root URL goes straight to the VNC viewer
-          cat > noVNC/index.html << 'EOF'
-          <html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=tester123"></head></html>
-          EOF
-
-      - name: Install & Configure ngrok
-        run: |
-          wget -q "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz" -O ngrok.tgz
-          tar xzf ngrok.tgz
-          sudo mv ngrok /usr/local/bin/ngrok
-          ngrok config add-authtoken $NGROK_AUTH_TOKEN
-
-      - name: Start noVNC & ngrok Tunnel
-        run: |
-          # Start websockify (bridges browser websockets to VNC on port 5900)
-          nohup python3 -m websockify --web=./noVNC 6080 localhost:5900 > websockify.log 2>&1 &
-          sleep 3
-
-          # Verify websockify is running
-          if ! ss -tln | grep -q ":6080"; then
-            echo "❌ websockify failed to start!"
-            cat websockify.log
-            exit 1
-          fi
-          echo "✅ websockify is running on port 6080"
-
-          # Start ngrok HTTP tunnel (free tier supports HTTP, just not TCP)
-          nohup ngrok http 6080 --log stdout > ngrok.log 2> ngrok.err &
-
-          # Wait for ngrok to start and grab the URL from its local API
-          echo "Waiting for ngrok tunnel..."
-          TUNNEL_URL=""
-          for i in $(seq 1 20); do
-            sleep 2
-            RESPONSE=$(curl -s http://localhost:4040/api/tunnels || true)
-            TUNNEL_URL=$(echo "$RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'])" 2>/dev/null || true)
-            if [ -n "$TUNNEL_URL" ]; then
-              break
+          echo "=== Screenshot AFTER forcing desktop ==="
+          screencapture -x /tmp/screen_after.png 2>&1 || echo "screencapture failed"
+          if [ -f /tmp/screen_after.png ]; then
+            ls -la /tmp/screen_after.png
+            file /tmp/screen_after.png
+            SIZE=$(stat -f%z /tmp/screen_after.png 2>/dev/null)
+            echo "Size: ${SIZE} bytes"
+            if [ "$SIZE" -gt 10000 ]; then
+              echo "✅ Screenshot has real content (${SIZE} bytes)"
+            elif [ "$SIZE" -gt 1000 ]; then
+              echo "⚠️ Screenshot is small — might be a blank desktop"
+            else
+              echo "❌ Screenshot is tiny — likely a black/empty screen"
             fi
-            echo "  Attempt $i/20 - ngrok not ready yet..."
-          done
+          else
+            echo "❌ screencapture produced no file"
+          fi
 
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "❌ Failed to start ngrok! Here are the logs:"
-            echo "---- STDOUT ----"
-            cat ngrok.log 2>/dev/null || true
-            echo "---- STDERR ----"
-            cat ngrok.err 2>/dev/null || true
+          echo ""
+          echo "=== Trying python screenshot as fallback ==="
+          python3 -c "
+          try:
+              import Quartz
+              image = Quartz.CGWindowListCreateImage(
+                  Quartz.CGRectInfinite,
+                  Quartz.kCGWindowListOptionOnScreenOnly,
+                  Quartz.kCGNullWindowID,
+                  Quartz.kCGWindowImageDefault
+              )
+              if image:
+                  w = Quartz.CGImageGetWidth(image)
+                  h = Quartz.CGImageGetHeight(image)
+                  bpp = Quartz.CGImageGetBitsPerPixel(image)
+                  print(f'  CGWindowListCreateImage: {w}x{h} @ {bpp}bpp')
+              else:
+                  print('  CGWindowListCreateImage returned None')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+
+          echo ""
+          echo "=== List all on-screen windows ==="
+          python3 -c "
+          try:
+              import Quartz
+              windows = Quartz.CGWindowListCopyWindowInfo(
+                  Quartz.kCGWindowListOptionOnScreenOnly,
+                  Quartz.kCGNullWindowID
+              )
+              if windows:
+                  print(f'  Total on-screen windows: {len(windows)}')
+                  for w in windows[:20]:
+                      name = w.get('kCGWindowOwnerName', '?')
+                      wname = w.get('kCGWindowName', '')
+                      layer = w.get('kCGWindowLayer', '?')
+                      bounds = w.get('kCGWindowBounds', {})
+                      bstr = f\"{bounds.get('Width', '?')}x{bounds.get('Height', '?')}\"
+                      print(f'  [{layer}] {name}: \"{wname}\" ({bstr})')
+              else:
+                  print('  No windows found')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+
+      - name: "[DIAG] VNC connection test"
+        run: |
+          echo "=== Testing VNC port locally ==="
+          nc -z -w 3 127.0.0.1 5900 && echo "✅ Port 5900 is open" || echo "❌ Port 5900 is closed"
+          echo ""
+          echo "=== Reading VNC banner ==="
+          echo "" | nc -w 3 127.0.0.1 5900 2>/dev/null | head -c 100 || echo "Could not read banner"
+          echo ""
+          echo ""
+          echo "=== RemoteManagement plist (final) ==="
+          sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null || echo "N/A"
+
+      - name: Install bore tunnel
+        run: |
+          BORE_URL=$(curl -s https://api.github.com/repos/ekzhang/bore/releases/latest \
+            | python3 -c "
+          import sys, json
+          assets = json.load(sys.stdin)['assets']
+          for a in assets:
+              name = a['name']
+              if 'apple-darwin' in name and ('aarch64' in name or 'x86_64' in name):
+                  print(a['browser_download_url'])
+                  break
+          ")
+          echo "Downloading: $BORE_URL"
+          curl -sL "$BORE_URL" | tar xz
+          chmod +x bore
+          sudo mv bore /usr/local/bin/bore
+          bore --version
+
+      - name: Start VNC tunnel
+        run: |
+          bore local 5900 --to bore.pub > /tmp/bore.log 2>&1 &
+          sleep 5
+          cat /tmp/bore.log
+          BORE_PORT=$(grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log | head -1 | cut -d: -f2)
+
+          if [ -z "$BORE_PORT" ]; then
+            echo "❌ Failed to get bore tunnel port:"
+            cat /tmp/bore.log
             exit 1
           fi
 
           echo ""
-          echo "======================================================="
-          echo "✅ READY TO CONNECT!"
+          echo "============================================"
+          echo "🚀 VNC REMOTE DESKTOP READY"
+          echo "============================================"
           echo ""
-          echo "🌐 Open this URL in your browser:"
-          echo "   $TUNNEL_URL"
+          echo "    bore.pub:${BORE_PORT}"
           echo ""
-          echo "   That's it! You'll see the Linux (Cinnamon) desktop right in"
-          echo "   your browser. No extra software needed."
-          echo ""
-          echo "   VNC Password (if prompted): tester123"
-          echo "======================================================="
+          echo "    Password: (workflow input)"
+          echo "============================================"
 
-          echo ""
-          echo "Keeping the runner alive... (Cancel the workflow manually when done)"
-          while true; do sleep 60; done
+      - name: Capture debug screenshot and push to repo
+        run: |
+          echo "=== Taking screenshot ==="
+          screencapture -x /tmp/debug_screenshot.png 2>&1 || true
+
+          # Fallback: try python-based capture if screencapture gives nothing useful
+          FILESIZE=$(stat -f%z /tmp/debug_screenshot.png 2>/dev/null || echo 0)
+          if [ ! -f /tmp/debug_screenshot.png ] || [ "$FILESIZE" -lt 500 ]; then
+            echo "screencapture failed or too small, trying python fallback..."
+            python3 << 'PYEOF'
+          import Quartz, os
+          from Foundation import NSURL
+          image = Quartz.CGWindowListCreateImage(
+              Quartz.CGRectInfinite,
+              Quartz.kCGWindowListOptionOnScreenOnly,
+              Quartz.kCGNullWindowID,
+              Quartz.kCGWindowImageDefault
+          )
+          if image:
+              url = NSURL.fileURLWithPath_('/tmp/debug_screenshot.png')
+              dest = Quartz.CGImageDestinationCreateWithURL(url, 'public.png', 1, None)
+              if dest:
+                  Quartz.CGImageDestinationAddImage(dest, image, None)
+                  Quartz.CGImageDestinationFinalize(dest)
+                  print('Python screenshot saved')
+              else:
+                  print('Failed to create image destination')
+          else:
+              print('CGWindowListCreateImage returned None')
+          PYEOF
+          fi
+
+          if [ -f /tmp/debug_screenshot.png ]; then
+            ls -la /tmp/debug_screenshot.png
+            file /tmp/debug_screenshot.png
+            cp /tmp/debug_screenshot.png ./debug_screenshot.png
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add debug_screenshot.png
+            git commit -m "debug: VNC screenshot $(date -u +%Y-%m-%dT%H:%M:%SZ)" --allow-empty || true
+            git push || true
+            echo "✅ Screenshot pushed to repo root as debug_screenshot.png"
+          else
+            echo "❌ No screenshot file was produced"
+          fi
+
+      - name: Keep alive until timeout
+        run: |
+          echo "⏳ Session active (${{ github.event.inputs.session_timeout }} min)."
+          TIMEOUT=$(( ${{ github.event.inputs.session_timeout }} * 60 ))
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            sleep 60
+            ELAPSED=$((ELAPSED + 60))
+            REMAINING=$(( (TIMEOUT - ELAPSED) / 60 ))
+            echo "⏱️  ${REMAINING} min remaining..."
+          done
+          echo "🛑 Session timed out."
