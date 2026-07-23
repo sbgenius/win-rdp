@@ -105,6 +105,21 @@ jobs:
           caffeinate -u -t 10 &
           echo "✅ Sleep disabled"
 
+      - name: Set display resolution to 1920x1080
+        run: |
+          brew install displayplacer 2>&1 || true
+          echo "=== Current display config ==="
+          displayplacer list 2>&1 || true
+          echo ""
+          echo "=== Setting resolution to 1920x1080 ==="
+          displayplacer "id:1 res:1920x1080 scaling:on" 2>&1 || \
+          displayplacer "id:1 res:1920x1080 scaling:off" 2>&1 || \
+          displayplacer "id:1 mode:1920x1080" 2>&1 || true
+          sleep 2
+          echo "=== New display config ==="
+          displayplacer list 2>&1 || true
+          echo "✅ Resolution set"
+
       - name: Configure ARD/VNC preferences
         run: |
           echo "=== Setting VNC preferences ==="
