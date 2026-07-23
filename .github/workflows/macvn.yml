@@ -143,6 +143,33 @@ jobs:
           echo "=== Verify all RemoteManagement prefs ==="
           sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null || echo "N/A"
 
+      - name: Grant screen capture TCC permissions
+        run: |
+          echo "=== Granting screen capture to VNC services ==="
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+
+          # Check existing
+          echo "=== Existing ScreenCapture entries (BEFORE) ==="
+          sudo sqlite3 "$TCC_DB" "SELECT client, auth_value FROM access WHERE service='kTCCServiceScreenCapture';" 2>&1 || true
+          echo ""
+
+          # Grant to screensharingd
+          sudo sqlite3 "$TCC_DB" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/libexec/screensharingd', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert screensharingd"
+
+          # Grant to ARDAgent
+          sudo sqlite3 "$TCC_DB" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert ARDAgent"
+
+          # Grant to screencapture binary
+          sudo sqlite3 "$TCC_DB" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/sbin/screencapture', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert screencapture"
+
+          echo ""
+          echo "=== Current TCC ScreenCapture entries (AFTER) ==="
+          sudo sqlite3 "$TCC_DB" "SELECT client, auth_value FROM access WHERE service='kTCCServiceScreenCapture';" 2>&1 || true
+          echo "✅ TCC permissions configured"
+
       - name: Enable VNC (Screen Sharing)
         run: |
           echo "=== Kickstart ARD ==="
