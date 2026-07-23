@@ -238,91 +238,62 @@ jobs:
           ls -la /tmp/screen_before_click.png 2>/dev/null || true
 
           echo ""
-          echo "=== Method 1: Quartz CGEvent mouse click ==="
-          /usr/bin/python3 << 'PYEOF' || true
-          import Quartz
-          import time
-
-          # Get current screen size
-          main_display = Quartz.CGMainDisplayID()
-          width = Quartz.CGDisplayPixelsWide(main_display)
-          height = Quartz.CGDisplayPixelsHigh(main_display)
-          print(f"Screen size: {width}x{height}")
-
-          # The Allow button is centered horizontally in a dialog that's centered on screen
-          # From the 1024x768 screenshot: button was at roughly (510, 387)
-          # Scale proportionally to current resolution
-          btn_x = int(width * 510 / 1024)
-          btn_y = int(height * 387 / 768)
-          print(f"Estimated Allow button position: ({btn_x}, {btn_y})")
-
-          def click(x, y):
-              point = Quartz.CGPoint(x, y)
-              # Mouse move
-              move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, point, 0)
-              Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
-              time.sleep(0.1)
-              # Mouse down
-              down = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, point, 0)
-              Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-              time.sleep(0.05)
-              # Mouse up
-              up = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, point, 0)
-              Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
-              print(f"Clicked at ({x}, {y})")
-
-          # Click the estimated Allow button position
-          click(btn_x, btn_y)
-          time.sleep(1)
-
-          # Also try a few nearby positions in case dialog shifted
-          for offset_y in [-15, 0, 15]:
-              for offset_x in [-20, 0, 20]:
-                  click(btn_x + offset_x, btn_y + offset_y)
-                  time.sleep(0.2)
-
-          print("CGEvent clicks done")
-          PYEOF
-
-          sleep 2
+          echo "=== Method 1: AppleScript click button by name ==="
+          for attempt in 1 2 3; do
+            echo "Attempt $attempt..."
+            osascript -e '
+              tell application "System Events"
+                try
+                  set procList to name of every application process
+                  if "UserNotificationCenter" is in procList then
+                    tell application process "UserNotificationCenter"
+                      set frontmost to true
+                      delay 0.5
+                      try
+                        click button "Allow" of window 1
+                        log "Clicked Allow button"
+                      end try
+                      try
+                        click button "OK" of window 1
+                        log "Clicked OK button"
+                      end try
+                    end tell
+                  else
+                    log "UserNotificationCenter not running"
+                  end if
+                end try
+              end tell
+            ' 2>&1 || true
+            sleep 2
+          done
 
           echo ""
-          echo "=== Method 2: AppleScript System Events ==="
-          osascript -e '
-            tell application "System Events"
-              try
-                set procList to name of every application process
-                if "UserNotificationCenter" is in procList then
-                  tell application process "UserNotificationCenter"
-                    set frontmost to true
-                    delay 0.5
-                    try
-                      click button "Allow" of window 1
-                    end try
-                  end tell
-                  log "Clicked Allow via System Events"
-                else
-                  log "UserNotificationCenter not found"
-                end if
-              end try
-            end tell
-          ' 2>&1 || true
-
-          sleep 2
-
-          echo ""
-          echo "=== Method 3: cliclick (if available) ==="
+          echo "=== Method 2: cliclick at estimated coordinates ==="
           brew install cliclick 2>/dev/null || true
           if command -v cliclick &>/dev/null; then
-            # Same estimated position
-            SCREEN_W=$(/usr/bin/python3 -c "import Quartz; print(Quartz.CGDisplayPixelsWide(Quartz.CGMainDisplayID()))")
-            SCREEN_H=$(/usr/bin/python3 -c "import Quartz; print(Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID()))")
+            # Get screen size via osascript (no Python needed)
+            SCREEN_SIZE=$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null || echo "0, 0, 1920, 1080")
+            SCREEN_W=$(echo "$SCREEN_SIZE" | awk -F', ' '{print $3}')
+            SCREEN_H=$(echo "$SCREEN_SIZE" | awk -F', ' '{print $4}')
+            echo "Screen size: ${SCREEN_W}x${SCREEN_H}"
+
+            # Scale Allow button position from original 1024x768 screenshot
             BTN_X=$((SCREEN_W * 510 / 1024))
             BTN_Y=$((SCREEN_H * 387 / 768))
+            echo "Clicking at estimated position: ${BTN_X},${BTN_Y}"
             cliclick c:${BTN_X},${BTN_Y} 2>&1 || true
-            echo "cliclick done at ${BTN_X},${BTN_Y}"
+
+            # Also try nearby positions
+            for dy in -20 -10 0 10 20; do
+              for dx in -30 -15 0 15 30; do
+                CX=$((BTN_X + dx))
+                CY=$((BTN_Y + dy))
+                cliclick c:${CX},${CY} 2>&1 || true
+              done
+            done
+            echo "cliclick grid done"
           else
-            echo "cliclick not available, skipping"
+            echo "cliclick not available"
           fi
 
           sleep 2
