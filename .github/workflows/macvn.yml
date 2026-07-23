@@ -105,6 +105,21 @@ jobs:
           caffeinate -u -t 10 &
           echo "✅ Sleep disabled"
 
+      - name: Set display resolution to 1920x1080
+        run: |
+          brew install displayplacer 2>&1 || true
+          echo "=== Current display config ==="
+          displayplacer list 2>&1 || true
+          echo ""
+          echo "=== Setting resolution to 1920x1080 ==="
+          displayplacer "id:1 res:1920x1080 scaling:on" 2>&1 || \
+          displayplacer "id:1 res:1920x1080 scaling:off" 2>&1 || \
+          displayplacer "id:1 mode:1920x1080" 2>&1 || true
+          sleep 2
+          echo "=== New display config ==="
+          displayplacer list 2>&1 || true
+          echo "✅ Resolution set"
+
       - name: Configure ARD/VNC preferences
         run: |
           echo "=== Setting VNC preferences ==="
@@ -127,51 +142,6 @@ jobs:
           echo ""
           echo "=== Verify all RemoteManagement prefs ==="
           sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null || echo "N/A"
-
-      - name: Grant screen capture TCC permissions
-        run: |
-          echo "=== Granting screen capture to VNC services ==="
-          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
-
-          # Check what columns exist in the TCC access table
-          echo "TCC table schema:"
-          sudo sqlite3 "$TCC_DB" ".schema access" 2>&1 || true
-          echo ""
-
-          echo "=== Existing ScreenCapture entries (BEFORE) ==="
-          sudo sqlite3 "$TCC_DB" "SELECT client, auth_value FROM access WHERE service='kTCCServiceScreenCapture';" 2>&1 || true
-          echo ""
-
-          # Grant to screensharingd
-          sudo sqlite3 "$TCC_DB" \
-            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/libexec/screensharingd', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert screensharingd"
-
-          # Grant to ARDAgent
-          sudo sqlite3 "$TCC_DB" \
-            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert ARDAgent"
-
-          # Grant to bash (the dialog we saw)
-          sudo sqlite3 "$TCC_DB" \
-            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/bin/bash', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert bash"
-
-          # Grant to osascript
-          sudo sqlite3 "$TCC_DB" \
-            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/bin/osascript', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert osascript"
-
-          # Grant to screencapture binary
-          sudo sqlite3 "$TCC_DB" \
-            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/sbin/screencapture', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert screencapture"
-
-          echo ""
-          echo "=== Current TCC ScreenCapture entries (AFTER) ==="
-          sudo sqlite3 "$TCC_DB" "SELECT client, auth_value FROM access WHERE service='kTCCServiceScreenCapture';" 2>&1 || true
-
-          # Restart ARDAgent to pick up new TCC grants
-          echo ""
-          echo "=== Restarting ARD agent to pick up TCC changes ==="
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent 2>&1 || true
-          sleep 2
-          echo "✅ TCC permissions configured"
 
       - name: Enable VNC (Screen Sharing)
         run: |
@@ -261,45 +231,111 @@ jobs:
           sleep 1
           echo "✅ Finder + TextEdit launched"
 
-      - name: Auto-dismiss TCC permission dialogs
+      - name: Click Allow on TCC permission dialog
         run: |
-          echo "=== Attempting to dismiss permission dialogs ==="
-          # Try clicking "Allow" on any TCC dialog
-          for i in 1 2 3; do
-            osascript -e '
-              tell application "System Events"
-                try
-                  set notifProc to application process "UserNotificationCenter"
-                  if exists notifProc then
-                    set wins to windows of notifProc
-                    repeat with w in wins
-                      try
-                        click button "Allow" of w
-                        delay 0.5
-                      end try
-                    end repeat
-                  end if
-                end try
-              end tell
-            ' 2>&1 || true
-            sleep 2
-          done
+          echo "=== Taking pre-click screenshot ==="
+          screencapture -x /tmp/screen_before_click.png 2>&1 || true
+          ls -la /tmp/screen_before_click.png 2>/dev/null || true
 
-          # Also try via cliclick if available, or keystroke approach
+          echo ""
+          echo "=== Method 1: Quartz CGEvent mouse click ==="
+          python3 << 'PYEOF'
+          import Quartz
+          import time
+
+          # Get current screen size
+          main_display = Quartz.CGMainDisplayID()
+          width = Quartz.CGDisplayPixelsWide(main_display)
+          height = Quartz.CGDisplayPixelsHigh(main_display)
+          print(f"Screen size: {width}x{height}")
+
+          # The Allow button is centered horizontally in a dialog that's centered on screen
+          # From the 1024x768 screenshot: button was at roughly (510, 387)
+          # Scale proportionally to current resolution
+          btn_x = int(width * 510 / 1024)
+          btn_y = int(height * 387 / 768)
+          print(f"Estimated Allow button position: ({btn_x}, {btn_y})")
+
+          def click(x, y):
+              point = Quartz.CGPoint(x, y)
+              # Mouse move
+              move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, point, 0)
+              Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+              time.sleep(0.1)
+              # Mouse down
+              down = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, point, 0)
+              Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+              time.sleep(0.05)
+              # Mouse up
+              up = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, point, 0)
+              Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+              print(f"Clicked at ({x}, {y})")
+
+          # Click the estimated Allow button position
+          click(btn_x, btn_y)
+          time.sleep(1)
+
+          # Also try a few nearby positions in case dialog shifted
+          for offset_y in [-15, 0, 15]:
+              for offset_x in [-20, 0, 20]:
+                  click(btn_x + offset_x, btn_y + offset_y)
+                  time.sleep(0.2)
+
+          print("CGEvent clicks done")
+          PYEOF
+
+          sleep 2
+
+          echo ""
+          echo "=== Method 2: AppleScript System Events ==="
           osascript -e '
             tell application "System Events"
               try
-                click button "OK" of window 1 of application process "UserNotificationCenter"
+                set procList to name of every application process
+                if "UserNotificationCenter" is in procList then
+                  tell application process "UserNotificationCenter"
+                    set frontmost to true
+                    delay 0.5
+                    try
+                      click button "Allow" of window 1
+                    end try
+                  end tell
+                  log "Clicked Allow via System Events"
+                else
+                  log "UserNotificationCenter not found"
+                end if
               end try
             end tell
           ' 2>&1 || true
 
-          echo "✅ Dialog dismissal attempted"
+          sleep 2
+
+          echo ""
+          echo "=== Method 3: cliclick (if available) ==="
+          brew install cliclick 2>/dev/null || true
+          if command -v cliclick &>/dev/null; then
+            # Same estimated position
+            SCREEN_W=$(python3 -c "import Quartz; print(Quartz.CGDisplayPixelsWide(Quartz.CGMainDisplayID()))")
+            SCREEN_H=$(python3 -c "import Quartz; print(Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID()))")
+            BTN_X=$((SCREEN_W * 510 / 1024))
+            BTN_Y=$((SCREEN_H * 387 / 768))
+            cliclick c:${BTN_X},${BTN_Y} 2>&1 || true
+            echo "cliclick done at ${BTN_X},${BTN_Y}"
+          else
+            echo "cliclick not available, skipping"
+          fi
+
+          sleep 2
+          echo ""
+          echo "=== Taking post-click screenshot ==="
+          screencapture -x /tmp/screen_after_click.png 2>&1 || true
+          ls -la /tmp/screen_after_click.png 2>/dev/null || true
+          echo "✅ Click attempts completed"
 
       - name: "[DIAG] Screenshot test (AFTER desktop force)"
         run: |
           echo "=== Screenshot AFTER forcing desktop ==="
-          screencapture -x /tmp/screen_after.png 2>&1 || true
+          screencapture -x /tmp/screen_after.png 2>&1 || echo "screencapture failed"
           if [ -f /tmp/screen_after.png ]; then
             ls -la /tmp/screen_after.png
             file /tmp/screen_after.png
