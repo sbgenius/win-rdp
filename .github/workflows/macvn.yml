@@ -1,17 +1,343 @@
-name: Debug macOS Runner
+name: macOS Remote Desktop (VNC)
 
 on:
-  workflow_dispatch:  # lets you trigger it manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      vnc_password:
+        description: "VNC password (max 8 chars)"
+        required: true
+        default: "remoteme"
+      session_timeout:
+        description: "Max session time in minutes"
+        required: true
+        default: "30"
 
 jobs:
-  debug:
+  remote-desktop:
     runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    timeout-minutes: ${{ fromJSON(github.event.inputs.session_timeout) }}
 
-      - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
-        with:
-          limit-access-to-actor: true   # only your GitHub account can connect
-        timeout-minutes: 30             # session auto-closes after 30 min
+    steps:
+      - name: "[DIAG] System info"
+        run: |
+          echo "=== OS ==="
+          sw_vers
+          echo ""
+          echo "=== Architecture ==="
+          uname -a
+          echo ""
+          echo "=== User ==="
+          whoami
+          id
+          echo ""
+          echo "=== SIP Status ==="
+          csrutil status 2>&1 || true
+          echo ""
+          echo "=== Current GUI session user ==="
+          stat -f '%Su' /dev/console 2>/dev/null || echo "N/A"
+          echo ""
+          echo "=== Login window settings ==="
+          sudo defaults read /Library/Preferences/com.apple.loginwindow 2>/dev/null || echo "N/A"
+
+      - name: "[DIAG] Display & WindowServer (BEFORE)"
+        run: |
+          echo "=== WindowServer process ==="
+          ps aux | grep -i windowserver | grep -v grep || echo "NOT RUNNING"
+          echo ""
+          echo "=== Display info ==="
+          system_profiler SPDisplaysDataType 2>/dev/null || echo "N/A"
+          echo ""
+          echo "=== CGSession ==="
+          python3 -c "
+          try:
+              import Quartz
+              d = Quartz.CGSessionCopyCurrentDictionary()
+              if d:
+                  for k in sorted(d):
+                      print(f'  {k} = {d[k]}')
+              else:
+                  print('  CGSessionCopyCurrentDictionary returned None')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+          echo ""
+          echo "=== Quartz display list ==="
+          python3 -c "
+          try:
+              import Quartz
+              err, ids, cnt = Quartz.CGGetActiveDisplayList(10, None, None)
+              print(f'  Error code: {err}')
+              print(f'  Active display count: {cnt}')
+              if ids:
+                  for d in ids:
+                      b = Quartz.CGDisplayBounds(d)
+                      print(f'  Display {d}: {int(b.size.width)}x{int(b.size.height)} at ({int(b.origin.x)},{int(b.origin.y)})')
+                      print(f'    Online: {Quartz.CGDisplayIsOnline(d)}')
+                      print(f'    Active: {Quartz.CGDisplayIsActive(d)}')
+                      print(f'    Asleep: {Quartz.CGDisplayIsAsleep(d)}')
+                      print(f'    Main: {Quartz.CGDisplayIsMain(d)}')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+          echo ""
+          echo "=== Power management settings ==="
+          pmset -g 2>/dev/null || true
+          echo ""
+          echo "=== Screen capture test (BEFORE VNC) ==="
+          screencapture -x /tmp/screen_before.png 2>&1 || echo "screencapture failed"
+          if [ -f /tmp/screen_before.png ]; then
+            ls -la /tmp/screen_before.png
+            file /tmp/screen_before.png
+          fi
+
+      - name: Prevent sleep
+        run: |
+          sudo pmset -a displaysleep 0 sleep 0 disksleep 0 hibernatemode 0
+          defaults write com.apple.screensaver idleTime 0
+          defaults write com.apple.screensaver askForPassword 0
+          caffeinate -disu &
+          caffeinate -u -t 10 &
+          echo "✅ Sleep disabled"
+
+      - name: Configure ARD/VNC preferences
+        run: |
+          echo "=== Setting VNC preferences ==="
+
+          # Force VNC to use the console (real) session
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
+          echo "  VNCAlwaysStartOnConsole = true"
+
+          # Disable curtain (prevents intentional black screen)
+          sudo defaults write /Library/Preferences/com.apple.RemoteManagement dontCurtainDuringObservation -bool true
+          echo "  dontCurtainDuringObservation = true"
+
+          # Auto-login
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$(whoami)"
+          echo "  autoLoginUser = $(whoami)"
+
+          # Disable screen lock
+          sysadminctl -screenLock off 2>/dev/null || true
+
+          echo ""
+          echo "=== Verify all RemoteManagement prefs ==="
+          sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null || echo "N/A"
+
+      - name: Enable VNC (Screen Sharing)
+        run: |
+          echo "=== Kickstart ARD ==="
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate \
+            -configure -access -on \
+            -configure -allowAccessFor -allUsers \
+            -configure -restart -agent \
+            -clientopts -setvnclegacy -vnclegacy yes \
+            -clientopts -setvncpw -vncpw "${{ github.event.inputs.vnc_password }}" \
+            -restart -agent -privs -all 2>&1
+          echo ""
+
+          echo "=== Restart agent after pref changes ==="
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -restart -agent 2>&1
+          sleep 3
+          echo ""
+
+          echo "=== Verify VNC is listening ==="
+          lsof -i :5900 2>/dev/null || echo "⚠️ Nothing on port 5900"
+          echo ""
+          netstat -an | grep 5900 || echo "⚠️ netstat shows nothing on 5900"
+
+      - name: "[DIAG] Display & WindowServer (AFTER VNC)"
+        run: |
+          echo "=== WindowServer process ==="
+          ps aux | grep -i windowserver | grep -v grep || echo "NOT RUNNING"
+          echo ""
+          echo "=== ARDAgent process ==="
+          ps aux | grep -i ARDAgent | grep -v grep || echo "NOT RUNNING"
+          echo ""
+          echo "=== screensharingd process ==="
+          ps aux | grep -i screensharing | grep -v grep || echo "NOT RUNNING"
+          echo ""
+          echo "=== All relevant processes ==="
+          ps aux | grep -iE '(vnc|ard|screensharing|windowserver|loginwindow|Finder)' | grep -v grep || true
+          echo ""
+          echo "=== Quartz display list (AFTER) ==="
+          python3 -c "
+          try:
+              import Quartz
+              err, ids, cnt = Quartz.CGGetActiveDisplayList(10, None, None)
+              print(f'  Error code: {err}')
+              print(f'  Active display count: {cnt}')
+              if ids:
+                  for d in ids:
+                      b = Quartz.CGDisplayBounds(d)
+                      print(f'  Display {d}: {int(b.size.width)}x{int(b.size.height)} at ({int(b.origin.x)},{int(b.origin.y)})')
+                      print(f'    Online: {Quartz.CGDisplayIsOnline(d)}')
+                      print(f'    Active: {Quartz.CGDisplayIsActive(d)}')
+                      print(f'    Asleep: {Quartz.CGDisplayIsAsleep(d)}')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+          echo ""
+          echo "=== CGSession (AFTER) ==="
+          python3 -c "
+          try:
+              import Quartz
+              d = Quartz.CGSessionCopyCurrentDictionary()
+              if d:
+                  for k in sorted(d):
+                      print(f'  {k} = {d[k]}')
+              else:
+                  print('  CGSessionCopyCurrentDictionary returned None')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+
+      - name: Force desktop to render
+        run: |
+          caffeinate -u -t 5
+          osascript -e 'tell application "Finder" to activate' 2>&1 || true
+          sleep 2
+          osascript -e 'tell application "Finder"
+            make new Finder window
+            set bounds of front Finder window to {50, 50, 900, 600}
+          end tell' 2>&1 || true
+          sleep 1
+          osascript -e 'tell application "TextEdit"
+            activate
+            make new document
+            set text of front document to "GitHub Actions macOS Remote Desktop"
+          end tell' 2>&1 || true
+          sleep 1
+          echo "✅ Finder + TextEdit launched"
+
+      - name: "[DIAG] Screenshot test (AFTER desktop force)"
+        run: |
+          echo "=== Screenshot AFTER forcing desktop ==="
+          screencapture -x /tmp/screen_after.png 2>&1
+          if [ -f /tmp/screen_after.png ]; then
+            ls -la /tmp/screen_after.png
+            file /tmp/screen_after.png
+            SIZE=$(stat -f%z /tmp/screen_after.png 2>/dev/null)
+            echo "Size: ${SIZE} bytes"
+            if [ "$SIZE" -gt 10000 ]; then
+              echo "✅ Screenshot has real content (${SIZE} bytes)"
+            elif [ "$SIZE" -gt 1000 ]; then
+              echo "⚠️ Screenshot is small — might be a blank desktop"
+            else
+              echo "❌ Screenshot is tiny — likely a black/empty screen"
+            fi
+          else
+            echo "❌ screencapture produced no file"
+          fi
+
+          echo ""
+          echo "=== Trying python screenshot as fallback ==="
+          python3 -c "
+          try:
+              import Quartz
+              image = Quartz.CGWindowListCreateImage(
+                  Quartz.CGRectInfinite,
+                  Quartz.kCGWindowListOptionOnScreenOnly,
+                  Quartz.kCGNullWindowID,
+                  Quartz.kCGWindowImageDefault
+              )
+              if image:
+                  w = Quartz.CGImageGetWidth(image)
+                  h = Quartz.CGImageGetHeight(image)
+                  bpp = Quartz.CGImageGetBitsPerPixel(image)
+                  print(f'  CGWindowListCreateImage: {w}x{h} @ {bpp}bpp')
+              else:
+                  print('  CGWindowListCreateImage returned None')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+
+          echo ""
+          echo "=== List all on-screen windows ==="
+          python3 -c "
+          try:
+              import Quartz
+              windows = Quartz.CGWindowListCopyWindowInfo(
+                  Quartz.kCGWindowListOptionOnScreenOnly,
+                  Quartz.kCGNullWindowID
+              )
+              if windows:
+                  print(f'  Total on-screen windows: {len(windows)}')
+                  for w in windows[:20]:
+                      name = w.get('kCGWindowOwnerName', '?')
+                      wname = w.get('kCGWindowName', '')
+                      layer = w.get('kCGWindowLayer', '?')
+                      bounds = w.get('kCGWindowBounds', {})
+                      bstr = f\"{bounds.get('Width', '?')}x{bounds.get('Height', '?')}\"
+                      print(f'  [{layer}] {name}: \"{wname}\" ({bstr})')
+              else:
+                  print('  No windows found')
+          except Exception as e:
+              print(f'  Error: {e}')
+          "
+
+      - name: "[DIAG] VNC connection test"
+        run: |
+          echo "=== Testing VNC port locally ==="
+          nc -z -w 3 127.0.0.1 5900 && echo "✅ Port 5900 is open" || echo "❌ Port 5900 is closed"
+          echo ""
+          echo "=== Reading VNC banner ==="
+          echo "" | nc -w 3 127.0.0.1 5900 2>/dev/null | head -c 100 || echo "Could not read banner"
+          echo ""
+          echo ""
+          echo "=== RemoteManagement plist (final) ==="
+          sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null || echo "N/A"
+
+      - name: Install bore tunnel
+        run: |
+          BORE_URL=$(curl -s https://api.github.com/repos/ekzhang/bore/releases/latest \
+            | python3 -c "
+          import sys, json
+          assets = json.load(sys.stdin)['assets']
+          for a in assets:
+              name = a['name']
+              if 'apple-darwin' in name and ('aarch64' in name or 'x86_64' in name):
+                  print(a['browser_download_url'])
+                  break
+          ")
+          echo "Downloading: $BORE_URL"
+          curl -sL "$BORE_URL" | tar xz
+          chmod +x bore
+          sudo mv bore /usr/local/bin/bore
+          bore --version
+
+      - name: Start VNC tunnel
+        run: |
+          bore local 5900 --to bore.pub > /tmp/bore.log 2>&1 &
+          sleep 5
+          cat /tmp/bore.log
+          BORE_PORT=$(grep -oE 'bore\.pub:[0-9]+' /tmp/bore.log | head -1 | cut -d: -f2)
+
+          if [ -z "$BORE_PORT" ]; then
+            echo "❌ Failed to get bore tunnel port:"
+            cat /tmp/bore.log
+            exit 1
+          fi
+
+          echo ""
+          echo "============================================"
+          echo "🚀 VNC REMOTE DESKTOP READY"
+          echo "============================================"
+          echo ""
+          echo "    bore.pub:${BORE_PORT}"
+          echo ""
+          echo "    Password: (workflow input)"
+          echo "============================================"
+
+      - name: Keep alive until timeout
+        run: |
+          echo "⏳ Session active (${{ github.event.inputs.session_timeout }} min)."
+          TIMEOUT=$(( ${{ github.event.inputs.session_timeout }} * 60 ))
+          ELAPSED=0
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            sleep 60
+            ELAPSED=$((ELAPSED + 60))
+            REMAINING=$(( (TIMEOUT - ELAPSED) / 60 ))
+            echo "⏱️  ${REMAINING} min remaining..."
+          done
+          echo "🛑 Session timed out."
