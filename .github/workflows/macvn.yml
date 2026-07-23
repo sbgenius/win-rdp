@@ -130,11 +130,6 @@ jobs:
 
       - name: Grant screen capture TCC permissions
         run: |
-          echo "=== Resetting ScreenCapture TCC permissions ==="
-          sudo tccutil reset ScreenCapture 2>&1 || true
-          sudo tccutil reset Accessibility 2>&1 || true
-          echo ""
-
           echo "=== Granting screen capture to VNC services ==="
           TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
 
@@ -143,9 +138,13 @@ jobs:
           sudo sqlite3 "$TCC_DB" ".schema access" 2>&1 || true
           echo ""
 
+          echo "=== Existing ScreenCapture entries (BEFORE) ==="
+          sudo sqlite3 "$TCC_DB" "SELECT client, auth_value FROM access WHERE service='kTCCServiceScreenCapture';" 2>&1 || true
+          echo ""
+
           # Grant to screensharingd
           sudo sqlite3 "$TCC_DB" \
-            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/libexec/screensharingd', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert screensharingd (SIP may block)"
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/libexec/screensharingd', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert screensharingd"
 
           # Grant to ARDAgent
           sudo sqlite3 "$TCC_DB" \
@@ -159,9 +158,19 @@ jobs:
           sudo sqlite3 "$TCC_DB" \
             "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/bin/osascript', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert osascript"
 
+          # Grant to screencapture binary
+          sudo sqlite3 "$TCC_DB" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/sbin/screencapture', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert screencapture"
+
           echo ""
-          echo "=== Current TCC ScreenCapture entries ==="
+          echo "=== Current TCC ScreenCapture entries (AFTER) ==="
           sudo sqlite3 "$TCC_DB" "SELECT client, auth_value FROM access WHERE service='kTCCServiceScreenCapture';" 2>&1 || true
+
+          # Restart ARDAgent to pick up new TCC grants
+          echo ""
+          echo "=== Restarting ARD agent to pick up TCC changes ==="
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -restart -agent 2>&1 || true
+          sleep 2
           echo "✅ TCC permissions configured"
 
       - name: Enable VNC (Screen Sharing)
@@ -290,7 +299,7 @@ jobs:
       - name: "[DIAG] Screenshot test (AFTER desktop force)"
         run: |
           echo "=== Screenshot AFTER forcing desktop ==="
-          screencapture -x /tmp/screen_after.png 2>&1
+          screencapture -x /tmp/screen_after.png 2>&1 || true
           if [ -f /tmp/screen_after.png ]; then
             ls -la /tmp/screen_after.png
             file /tmp/screen_after.png
