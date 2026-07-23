@@ -239,7 +239,7 @@ jobs:
 
           echo ""
           echo "=== Method 1: Quartz CGEvent mouse click ==="
-          python3 << 'PYEOF'
+          /usr/bin/python3 << 'PYEOF' || true
           import Quartz
           import time
 
@@ -315,8 +315,8 @@ jobs:
           brew install cliclick 2>/dev/null || true
           if command -v cliclick &>/dev/null; then
             # Same estimated position
-            SCREEN_W=$(python3 -c "import Quartz; print(Quartz.CGDisplayPixelsWide(Quartz.CGMainDisplayID()))")
-            SCREEN_H=$(python3 -c "import Quartz; print(Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID()))")
+            SCREEN_W=$(/usr/bin/python3 -c "import Quartz; print(Quartz.CGDisplayPixelsWide(Quartz.CGMainDisplayID()))")
+            SCREEN_H=$(/usr/bin/python3 -c "import Quartz; print(Quartz.CGDisplayPixelsHigh(Quartz.CGMainDisplayID()))")
             BTN_X=$((SCREEN_W * 510 / 1024))
             BTN_Y=$((SCREEN_H * 387 / 768))
             cliclick c:${BTN_X},${BTN_Y} 2>&1 || true
