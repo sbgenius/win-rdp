@@ -140,6 +140,10 @@ jobs:
           # Disable screen lock
           sysadminctl -screenLock off 2>/dev/null || true
 
+          echo "=== Forcing logout of runner to auto-login vncuser ==="
+          sudo killall loginwindow || true
+          sleep 5
+
       - name: Grant screen capture TCC permissions
         run: |
           echo "=== Granting screen capture to VNC services ==="
@@ -184,6 +188,9 @@ jobs:
           echo "=== Restart agent after pref changes ==="
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -restart -agent 2>&1
+          sleep 3
+          echo "=== Forcing screensharingd restart ==="
+          sudo killall screensharingd || true
           sleep 3
           echo ""
 
