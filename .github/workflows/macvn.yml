@@ -243,6 +243,13 @@ jobs:
       - name: Force desktop to render
         run: |
           caffeinate -u -t 5
+          
+          # Background loop to kill buggy screensavers that cause VNC black screens
+          (while true; do pkill -9 legacyScreenSaver 2>/dev/null || true; pkill -9 ScreenSaverEngine 2>/dev/null || true; sleep 2; done) &
+          
+          # Wake screen with a keypress
+          osascript -e 'tell application "System Events" to key code 123' 2>&1 || true
+          
           osascript -e 'tell application "Finder" to activate' 2>&1 || true
           sleep 2
           osascript -e 'tell application "Finder"
