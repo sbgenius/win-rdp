@@ -124,24 +124,21 @@ jobs:
         run: |
           echo "=== Setting VNC preferences ==="
 
+          # Create a dedicated VNC user to avoid 'runner' headless session issues
+          sudo sysadminctl -addUser vncuser -fullName "VNC User" -password "${{ github.event.inputs.vnc_password }}" -admin
+          echo "✅ Created vncuser"
+
           # Force VNC to use the console (real) session
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement VNCAlwaysStartOnConsole -bool true
-          echo "  VNCAlwaysStartOnConsole = true"
-
+          
           # Disable curtain (prevents intentional black screen)
           sudo defaults write /Library/Preferences/com.apple.RemoteManagement dontCurtainDuringObservation -bool true
-          echo "  dontCurtainDuringObservation = true"
 
-          # Auto-login
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$(whoami)"
-          echo "  autoLoginUser = $(whoami)"
+          # Auto-login the new user
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "vncuser"
 
           # Disable screen lock
           sysadminctl -screenLock off 2>/dev/null || true
-
-          echo ""
-          echo "=== Verify all RemoteManagement prefs ==="
-          sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null || echo "N/A"
 
       - name: Grant screen capture TCC permissions
         run: |
@@ -176,7 +173,8 @@ jobs:
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate \
             -configure -access -on \
-            -configure -allowAccessFor -allUsers \
+            -configure -allowAccessFor -specifiedUsers \
+            -configure -users vncuser \
             -configure -restart -agent \
             -clientopts -setvnclegacy -vnclegacy yes \
             -clientopts -setvncpw -vncpw "${{ github.event.inputs.vnc_password }}" \
