@@ -383,15 +383,19 @@ jobs:
 
       - name: Install bore tunnel
         run: |
-          BORE_URL=$(curl -s https://api.github.com/repos/ekzhang/bore/releases/latest \
+          BORE_URL=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" https://api.github.com/repos/ekzhang/bore/releases/latest \
             | python3 -c "
           import sys, json
-          assets = json.load(sys.stdin)['assets']
-          for a in assets:
-              name = a['name']
-              if 'apple-darwin' in name and ('aarch64' in name or 'x86_64' in name):
-                  print(a['browser_download_url'])
-                  break
+          try:
+              assets = json.load(sys.stdin)['assets']
+              for a in assets:
+                  name = a['name']
+                  if 'apple-darwin' in name and ('aarch64' in name or 'x86_64' in name):
+                      print(a['browser_download_url'])
+                      break
+          except Exception as e:
+              # Fallback to hardcoded URL if API rate limit exceeded
+              print('https://github.com/ekzhang/bore/releases/download/v0.5.1/bore-v0.5.1-aarch64-apple-darwin.tar.gz')
           ")
           echo "Downloading: $BORE_URL"
           curl -sL "$BORE_URL" | tar xz
