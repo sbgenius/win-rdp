@@ -128,6 +128,42 @@ jobs:
           echo "=== Verify all RemoteManagement prefs ==="
           sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null || echo "N/A"
 
+      - name: Grant screen capture TCC permissions
+        run: |
+          echo "=== Resetting ScreenCapture TCC permissions ==="
+          sudo tccutil reset ScreenCapture 2>&1 || true
+          sudo tccutil reset Accessibility 2>&1 || true
+          echo ""
+
+          echo "=== Granting screen capture to VNC services ==="
+          TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+
+          # Check what columns exist in the TCC access table
+          echo "TCC table schema:"
+          sudo sqlite3 "$TCC_DB" ".schema access" 2>&1 || true
+          echo ""
+
+          # Grant to screensharingd
+          sudo sqlite3 "$TCC_DB" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/libexec/screensharingd', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert screensharingd (SIP may block)"
+
+          # Grant to ARDAgent
+          sudo sqlite3 "$TCC_DB" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert ARDAgent"
+
+          # Grant to bash (the dialog we saw)
+          sudo sqlite3 "$TCC_DB" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/bin/bash', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert bash"
+
+          # Grant to osascript
+          sudo sqlite3 "$TCC_DB" \
+            "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version, indirect_object_identifier_type, indirect_object_identifier, flags, last_modified) VALUES ('kTCCServiceScreenCapture', '/usr/bin/osascript', 1, 2, 4, 1, 0, 'UNUSED', 0, strftime('%s','now'));" 2>&1 || echo "⚠️ Could not insert osascript"
+
+          echo ""
+          echo "=== Current TCC ScreenCapture entries ==="
+          sudo sqlite3 "$TCC_DB" "SELECT client, auth_value FROM access WHERE service='kTCCServiceScreenCapture';" 2>&1 || true
+          echo "✅ TCC permissions configured"
+
       - name: Enable VNC (Screen Sharing)
         run: |
           echo "=== Kickstart ARD ==="
@@ -215,6 +251,41 @@ jobs:
           end tell' 2>&1 || true
           sleep 1
           echo "✅ Finder + TextEdit launched"
+
+      - name: Auto-dismiss TCC permission dialogs
+        run: |
+          echo "=== Attempting to dismiss permission dialogs ==="
+          # Try clicking "Allow" on any TCC dialog
+          for i in 1 2 3; do
+            osascript -e '
+              tell application "System Events"
+                try
+                  set notifProc to application process "UserNotificationCenter"
+                  if exists notifProc then
+                    set wins to windows of notifProc
+                    repeat with w in wins
+                      try
+                        click button "Allow" of w
+                        delay 0.5
+                      end try
+                    end repeat
+                  end if
+                end try
+              end tell
+            ' 2>&1 || true
+            sleep 2
+          done
+
+          # Also try via cliclick if available, or keystroke approach
+          osascript -e '
+            tell application "System Events"
+              try
+                click button "OK" of window 1 of application process "UserNotificationCenter"
+              end try
+            end tell
+          ' 2>&1 || true
+
+          echo "✅ Dialog dismissal attempted"
 
       - name: "[DIAG] Screenshot test (AFTER desktop force)"
         run: |
