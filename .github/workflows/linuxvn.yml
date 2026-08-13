@@ -144,27 +144,42 @@ jobs:
 
       - name: Start Cinnamon session
         run: |
+          # Fresh apt installs sometimes leave glib schemas / icon caches uncompiled,
+          # which makes cinnamon (the panel/WM process) crash silently while
+          # nemo-desktop (desktop icons + right-click menu) keeps running fine.
+          # That combo is exactly "black screen, only right-click menu works".
+          sudo glib-compile-schemas /usr/share/glib-2.0/schemas/ || true
+          sudo gtk-update-icon-cache -f /usr/share/icons/hicolor || true
+
           export LIBGL_ALWAYS_SOFTWARE=1
           export GDK_BACKEND=x11
           export CLUTTER_BACKEND=x11
-          # Tell Muffin to skip GPU compositing effects entirely - much more reliable
-          # under software-rendered Xvfb than trying to get real GL acceleration working
+          export XDG_CURRENT_DESKTOP=X-Cinnamon
+          export XDG_SESSION_TYPE=x11
+          export XDG_DATA_DIRS=/usr/share/cinnamon:/usr/local/share:/usr/share
           export CLUTTER_PAINT=disable-clipped-redraws:disable-culling
 
-          # Launch a full Cinnamon session on the virtual display, detached from the job's shell
           nohup dbus-launch --exit-with-session cinnamon-session > cinnamon.log 2>&1 &
-          sleep 15
+          sleep 20
 
-          # Verify cinnamon is actually still alive (it silently exits on GL failures)
-          if ! pgrep -f cinnamon-session > /dev/null; then
-            echo "❌ Cinnamon session died on startup! Log output:"
-            cat cinnamon.log || true
+          echo "===== Processes ====="
+          ps aux | grep -E 'cinnamon|nemo|muffin|dbus' | grep -v grep
+
+          echo "===== glxinfo ====="
+          DISPLAY=$DISPLAY glxinfo -B 2>&1 || echo "glxinfo not available/failed"
+
+          echo "===== cinnamon.log (full) ====="
+          cat cinnamon.log || echo "no cinnamon.log found"
+
+          if ! pgrep -f "^cinnamon$" > /dev/null && ! pgrep -f "cinnamon --replace" > /dev/null; then
             echo ""
+            echo "❌ Cinnamon shell process is NOT running - see logs above for the crash reason."
             echo "⚠️ Falling back to Metacity (window manager only, no full Cinnamon shell)"
             nohup dbus-launch --exit-with-session metacity > metacity.log 2>&1 &
             sleep 5
+            cat metacity.log || true
           else
-            echo "✅ Cinnamon session started (see cinnamon.log for details)"
+            echo "✅ Cinnamon shell process confirmed running"
           fi
 
       - name: Install x11vnc password
