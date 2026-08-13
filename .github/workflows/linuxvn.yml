@@ -11,6 +11,16 @@ on:
           - both
           - windows
           - linux
+      width:
+        description: 'Display width (px)'
+        required: true
+        default: '1920'
+        type: string
+      height:
+        description: 'Display height (px)'
+        required: true
+        default: '1080'
+        type: string
 
 jobs:
   rdp-test-windows:
@@ -20,15 +30,18 @@ jobs:
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
     steps:
-      - name: Set Screen Resolution to 1920x1080
+      - name: Set Screen Resolution
+        env:
+          RES_WIDTH: ${{ github.event.inputs.width }}
+          RES_HEIGHT: ${{ github.event.inputs.height }}
         run: |
           try {
-            Set-DisplayResolution -Width 1920 -Height 1080 -Force
-            Write-Host "✅ Resolution set to 1920x1080"
+            Set-DisplayResolution -Width $env:RES_WIDTH -Height $env:RES_HEIGHT -Force
+            Write-Host "✅ Resolution set to ${env:RES_WIDTH}x${env:RES_HEIGHT}"
           } catch {
             Write-Host "⚠️ Set-DisplayResolution failed, trying registry method..."
-            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000" -Name "DefaultSettings.XResolution" -Value 1920 -PropertyType DWord -Force -ErrorAction SilentlyContinue
-            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000" -Name "DefaultSettings.YResolution" -Value 1080 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000" -Name "DefaultSettings.XResolution" -Value ([int]$env:RES_WIDTH) -PropertyType DWord -Force -ErrorAction SilentlyContinue
+            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000" -Name "DefaultSettings.YResolution" -Value ([int]$env:RES_HEIGHT) -PropertyType DWord -Force -ErrorAction SilentlyContinue
             Write-Host "Registry updated (resolution may apply after VNC starts)"
           }
 
@@ -133,14 +146,17 @@ jobs:
             at-spi2-core
           echo "✅ Cinnamon installed"
 
-      - name: Set up virtual display (1920x1080, with GLX)
+      - name: Set up virtual display (with GLX)
+        env:
+          RES_WIDTH: ${{ github.event.inputs.width }}
+          RES_HEIGHT: ${{ github.event.inputs.height }}
         run: |
           # +extension GLX +render is required or Cinnamon's compositor (Muffin/Clutter)
           # crashes on startup and you're left with only the Nemo desktop-icon layer
           # (which is why you only saw a right-click menu on a black screen)
-          Xvfb $DISPLAY -screen 0 1920x1080x24 +extension GLX +render -noreset &
+          Xvfb $DISPLAY -screen 0 ${RES_WIDTH}x${RES_HEIGHT}x24 +extension GLX +render -noreset &
           sleep 3
-          echo "✅ Xvfb running on $DISPLAY"
+          echo "✅ Xvfb running on $DISPLAY at ${RES_WIDTH}x${RES_HEIGHT}"
 
       - name: Start Cinnamon session
         run: |
