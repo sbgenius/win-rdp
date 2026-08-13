@@ -126,21 +126,46 @@ jobs:
             dbus-x11 \
             xvfb \
             x11vnc \
-            xterm
+            xterm \
+            mesa-utils \
+            libgl1-mesa-dri \
+            libglx-mesa0 \
+            at-spi2-core
           echo "✅ Cinnamon installed"
 
-      - name: Set up virtual display (1920x1080)
+      - name: Set up virtual display (1920x1080, with GLX)
         run: |
-          Xvfb $DISPLAY -screen 0 1920x1080x24 &
+          # +extension GLX +render is required or Cinnamon's compositor (Muffin/Clutter)
+          # crashes on startup and you're left with only the Nemo desktop-icon layer
+          # (which is why you only saw a right-click menu on a black screen)
+          Xvfb $DISPLAY -screen 0 1920x1080x24 +extension GLX +render -noreset &
           sleep 3
           echo "✅ Xvfb running on $DISPLAY"
 
       - name: Start Cinnamon session
         run: |
+          export LIBGL_ALWAYS_SOFTWARE=1
+          export GDK_BACKEND=x11
+          export CLUTTER_BACKEND=x11
+          # Tell Muffin to skip GPU compositing effects entirely - much more reliable
+          # under software-rendered Xvfb than trying to get real GL acceleration working
+          export CLUTTER_PAINT=disable-clipped-redraws:disable-culling
+
           # Launch a full Cinnamon session on the virtual display, detached from the job's shell
           nohup dbus-launch --exit-with-session cinnamon-session > cinnamon.log 2>&1 &
-          sleep 10
-          echo "✅ Cinnamon session started (see cinnamon.log for details)"
+          sleep 15
+
+          # Verify cinnamon is actually still alive (it silently exits on GL failures)
+          if ! pgrep -f cinnamon-session > /dev/null; then
+            echo "❌ Cinnamon session died on startup! Log output:"
+            cat cinnamon.log || true
+            echo ""
+            echo "⚠️ Falling back to Metacity (window manager only, no full Cinnamon shell)"
+            nohup dbus-launch --exit-with-session metacity > metacity.log 2>&1 &
+            sleep 5
+          else
+            echo "✅ Cinnamon session started (see cinnamon.log for details)"
+          fi
 
       - name: Install x11vnc password
         run: |
