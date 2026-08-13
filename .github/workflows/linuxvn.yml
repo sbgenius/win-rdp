@@ -1,1 +1,231 @@
+name: Remote Desktop Testing
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: 'Which runner(s) to start'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - windows
+          - linux
 
+jobs:
+  rdp-test-windows:
+    if: ${{ github.event.inputs.os == 'both' || github.event.inputs.os == 'windows' }}
+    runs-on: windows-latest
+    timeout-minutes: 360 # Max 6 hours
+    env:
+      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+    steps:
+      - name: Set Screen Resolution to 1920x1080
+        run: |
+          try {
+            Set-DisplayResolution -Width 1920 -Height 1080 -Force
+            Write-Host "✅ Resolution set to 1920x1080"
+          } catch {
+            Write-Host "⚠️ Set-DisplayResolution failed, trying registry method..."
+            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000" -Name "DefaultSettings.XResolution" -Value 1920 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+            New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Video\*\0000" -Name "DefaultSettings.YResolution" -Value 1080 -PropertyType DWord -Force -ErrorAction SilentlyContinue
+            Write-Host "Registry updated (resolution may apply after VNC starts)"
+          }
+
+      - name: Install TightVNC Server
+        run: |
+          choco install tightvnc -y --install-arguments '"/quiet /norestart ADDLOCAL=Server SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=tester123 SET_USECONTROLAUTHENTICATION=1 VALUE_OF_USECONTROLAUTHENTICATION=1 SET_CONTROLPASSWORD=1 VALUE_OF_CONTROLPASSWORD=tester123 SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1"'
+
+      - name: Setup Python websockify & Download noVNC
+        run: |
+          pip install websockify
+
+          # Download noVNC (the browser-based VNC client)
+          Invoke-WebRequest -Uri "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip" -OutFile "novnc.zip"
+          Expand-Archive -Path "novnc.zip" -DestinationPath "."
+          Rename-Item -Path "noVNC-1.5.0" -NewName "noVNC"
+
+          # Create a simple redirect so opening the root URL goes straight to the VNC viewer
+          Set-Content -Path "noVNC\index.html" -Value '<html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=tester123"></head></html>'
+
+      - name: Install & Configure ngrok
+        run: |
+          choco install ngrok -y
+          ngrok config add-authtoken $env:NGROK_AUTH_TOKEN
+
+      - name: Start noVNC & ngrok Tunnel
+        run: |
+          # Start websockify (bridges browser websockets to VNC on port 5900)
+          Start-Process -FilePath "python" -ArgumentList "-m websockify --web=.\noVNC 6080 localhost:5900" -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+
+          # Verify websockify is running
+          $ws = Get-NetTCPConnection -LocalPort 6080 -ErrorAction SilentlyContinue
+          if (-not $ws) {
+            Write-Host "❌ websockify failed to start!"
+            exit 1
+          }
+          Write-Host "✅ websockify is running on port 6080"
+
+          # Start ngrok HTTP tunnel (free tier supports HTTP, just not TCP)
+          Start-Process -FilePath "ngrok" -ArgumentList "http 6080 --log stdout" -RedirectStandardOutput "ngrok.log" -RedirectStandardError "ngrok.err" -WindowStyle Hidden
+
+          # Wait for ngrok to start and grab the URL from its local API
+          Write-Host "Waiting for ngrok tunnel..."
+          $tunnelUrl = $null
+          for ($i = 1; $i -le 20; $i++) {
+            Start-Sleep -Seconds 2
+            try {
+              $response = Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing -ErrorAction Stop
+              $json = $response.Content | ConvertFrom-Json
+              $tunnelUrl = $json.tunnels[0].public_url
+              if ($tunnelUrl) { break }
+            } catch {
+              Write-Host "  Attempt $i/20 - ngrok not ready yet..."
+            }
+          }
+
+          if (-not $tunnelUrl) {
+            Write-Host "❌ Failed to start ngrok! Here are the logs:"
+            Write-Host "---- STDOUT ----"
+            if (Test-Path "ngrok.log") { Get-Content "ngrok.log" }
+            Write-Host "---- STDERR ----"
+            if (Test-Path "ngrok.err") { Get-Content "ngrok.err" }
+            exit 1
+          }
+
+          Write-Host ""
+          Write-Host "======================================================="
+          Write-Host "✅ READY TO CONNECT! (Windows)"
+          Write-Host ""
+          Write-Host "🌐 Open this URL in your browser:"
+          Write-Host "   $tunnelUrl"
+          Write-Host ""
+          Write-Host "   VNC Password (if prompted): tester123"
+          Write-Host "======================================================="
+
+          Write-Host ""
+          Write-Host "Keeping the runner alive... (Cancel the workflow manually when done)"
+          while ($true) { Start-Sleep -Seconds 60 }
+
+  rdp-test-linux:
+    if: ${{ github.event.inputs.os == 'both' || github.event.inputs.os == 'linux' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Max 6 hours
+    env:
+      NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+      DISPLAY: ":1"
+      VNC_PW: tester123
+    steps:
+      - name: Install Cinnamon Desktop Environment
+        run: |
+          sudo apt-get update
+          # cinnamon-desktop-environment pulls in the full session; lightdm is skipped since we drive Xvfb directly
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            cinnamon-desktop-environment \
+            dbus-x11 \
+            xvfb \
+            x11vnc \
+            xterm
+          echo "✅ Cinnamon installed"
+
+      - name: Set up virtual display (1920x1080)
+        run: |
+          Xvfb $DISPLAY -screen 0 1920x1080x24 &
+          sleep 3
+          echo "✅ Xvfb running on $DISPLAY"
+
+      - name: Start Cinnamon session
+        run: |
+          # Launch a full Cinnamon session on the virtual display, detached from the job's shell
+          nohup dbus-launch --exit-with-session cinnamon-session > cinnamon.log 2>&1 &
+          sleep 10
+          echo "✅ Cinnamon session started (see cinnamon.log for details)"
+
+      - name: Install x11vnc password
+        run: |
+          mkdir -p ~/.vnc
+          x11vnc -storepasswd "$VNC_PW" ~/.vnc/passwd
+
+      - name: Start x11vnc server
+        run: |
+          nohup x11vnc -display $DISPLAY -forever -shared -rfbauth ~/.vnc/passwd -rfbport 5900 -bg -o x11vnc.log
+          sleep 3
+          if ! ss -ltn | grep -q ':5900'; then
+            echo "❌ x11vnc failed to start!"
+            cat x11vnc.log || true
+            exit 1
+          fi
+          echo "✅ x11vnc is running on port 5900"
+
+      - name: Setup Python websockify & Download noVNC
+        run: |
+          sudo apt-get install -y --no-install-recommends python3-pip
+          pip3 install --user websockify
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+          curl -L -o novnc.zip "https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.zip"
+          unzip -q novnc.zip
+          mv noVNC-1.5.0 noVNC
+
+          # Redirect root URL straight to the VNC viewer, auto-filling the password
+          cat > noVNC/index.html <<'EOF'
+          <html><head><meta http-equiv="refresh" content="0;url=vnc.html?autoconnect=true&resize=remote&password=tester123"></head></html>
+          EOF
+
+      - name: Install & Configure ngrok
+        run: |
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+            | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt-get update
+          sudo apt-get install -y ngrok
+          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
+
+      - name: Start noVNC & ngrok Tunnel
+        run: |
+          nohup python3 -m websockify --web=./noVNC 6080 localhost:5900 > websockify.log 2>&1 &
+          sleep 3
+          if ! ss -ltn | grep -q ':6080'; then
+            echo "❌ websockify failed to start!"
+            cat websockify.log || true
+            exit 1
+          fi
+          echo "✅ websockify is running on port 6080"
+
+          nohup ngrok http 6080 --log stdout > ngrok.log 2> ngrok.err &
+
+          echo "Waiting for ngrok tunnel..."
+          tunnelUrl=""
+          for i in $(seq 1 20); do
+            sleep 2
+            tunnelUrl=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['tunnels'][0]['public_url'] if d.get('tunnels') else '')" 2>/dev/null)
+            if [ -n "$tunnelUrl" ]; then
+              break
+            fi
+            echo "  Attempt $i/20 - ngrok not ready yet..."
+          done
+
+          if [ -z "$tunnelUrl" ]; then
+            echo "❌ Failed to start ngrok! Here are the logs:"
+            echo "---- STDOUT ----"
+            cat ngrok.log 2>/dev/null || true
+            echo "---- STDERR ----"
+            cat ngrok.err 2>/dev/null || true
+            exit 1
+          fi
+
+          echo ""
+          echo "======================================================="
+          echo "✅ READY TO CONNECT! (Linux / Cinnamon)"
+          echo ""
+          echo "🌐 Open this URL in your browser:"
+          echo "   $tunnelUrl"
+          echo ""
+          echo "   VNC Password (if prompted): tester123"
+          echo "======================================================="
+
+          echo ""
+          echo "Keeping the runner alive... (Cancel the workflow manually when done)"
+          while true; do sleep 60; done
